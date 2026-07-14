@@ -48,9 +48,10 @@ RUN set -eux; \
 
 RUN set -eux; \
     git clone --depth=1 https://github.com/NVIDIA/nvbandwidth.git /opt/nvbandwidth-src; \
-    cd /opt/nvbandwidth-src; \
-    sh ./debian_install.sh; \
-    install -m 0755 /opt/nvbandwidth-src/nvbandwidth /usr/local/bin/nvbandwidth
+    cmake -S /opt/nvbandwidth-src -B /opt/nvbandwidth-src/build \
+        -DCMAKE_CUDA_ARCHITECTURES="${CUDA_ARCH}"; \
+    cmake --build /opt/nvbandwidth-src/build -j "$(nproc)"; \
+    install -m 0755 /opt/nvbandwidth-src/build/nvbandwidth /usr/local/bin/nvbandwidth
 
 RUN set -eux; \
     git clone --depth=1 https://github.com/ComputationalRadiationPhysics/cuda_memtest.git /opt/cuda_memtest-src; \
