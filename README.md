@@ -22,7 +22,10 @@ docker build --no-cache -t <image_name>:latest .
 docker exec -it <container_name> bash
 
 # stop/remove container
-docker rm -f <container_name>
+docker rm -f <container_id>
+
+# remove image
+docker rmi <image_id>
 
 # clean stopped containers
 docker container prune
