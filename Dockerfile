@@ -22,6 +22,7 @@ RUN apt-get update && \
         memtester \
         stressapptest \
         stress-ng \
+	coreutils grep vim \
     && rm -rf /var/lib/apt/lists/*
 
 WORKDIR /opt
