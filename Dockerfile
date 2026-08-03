@@ -22,7 +22,7 @@ RUN apt-get update && \
         memtester \
         stressapptest \
         stress-ng \
-	coreutils grep vim \
+        coreutils grep vim \
     && rm -rf /var/lib/apt/lists/*
 
 WORKDIR /opt
@@ -39,6 +39,8 @@ RUN set -eux; \
         /results; \
     phoronix-test-suite enterprise-setup; \
     phoronix-test-suite batch-install ${PTS_TESTS}
+
+COPY fio-safe.fio /opt/benchmarks/fio-safe.fio
 
 RUN set -eux; \
     git clone --depth=1 https://github.com/wilicc/gpu-burn.git /opt/gpu-burn; \
