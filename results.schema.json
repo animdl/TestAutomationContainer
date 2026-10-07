@@ -1,0 +1,601 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://example.invalid/workstation-benchmark-results-v3.schema.json",
+  "title": "Workstation benchmark results",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema_version",
+    "collector",
+    "run_id",
+    "image",
+    "suite",
+    "started_at",
+    "finished_at",
+    "duration_seconds",
+    "status",
+    "tests",
+    "warnings",
+    "errors"
+  ],
+  "properties": {
+    "schema_version": {"const": 3},
+    "collector": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["version", "parser_version", "python_version", "sources"],
+      "properties": {
+        "version": {"type": "integer", "minimum": 1},
+        "parser_version": {"type": "integer", "minimum": 1},
+        "python_version": {"type": "string", "minLength": 1},
+        "sources": {
+          "type": "object",
+          "minProperties": 3,
+          "additionalProperties": {"$ref": "#/$defs/sha256"}
+        }
+      }
+    },
+    "run_id": {"type": "string", "minLength": 1},
+    "image": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["requested", "image_id", "repo_digests"],
+      "properties": {
+        "requested": {"type": "string", "minLength": 1},
+        "image_id": {"type": ["string", "null"]},
+        "repo_digests": {
+          "type": "array",
+          "items": {"type": "string"}
+        }
+      }
+    },
+    "suite": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["command_sha256", "test_count", "steps"],
+      "properties": {
+        "command_sha256": {"$ref": "#/$defs/sha256"},
+        "test_count": {"type": "integer", "minimum": 0},
+        "steps": {
+          "type": "array",
+          "items": {"type": "string", "minLength": 1},
+          "uniqueItems": true
+        }
+      }
+    },
+    "started_at": {"$ref": "#/$defs/timestamp"},
+    "finished_at": {
+      "oneOf": [
+        {"$ref": "#/$defs/timestamp"},
+        {"type": "null"}
+      ]
+    },
+    "duration_seconds": {"$ref": "#/$defs/nullable_nonnegative_number"},
+    "status": {
+      "enum": [
+        "running",
+        "completed",
+        "completed_with_issues",
+        "interrupted",
+        "runner_error"
+      ]
+    },
+    "tests": {
+      "type": "array",
+      "items": {"$ref": "#/$defs/test_result"}
+    },
+    "warnings": {"$ref": "#/$defs/string_array"},
+    "errors": {"$ref": "#/$defs/string_array"}
+  },
+  "$defs": {
+    "sha256": {
+      "type": "string",
+      "pattern": "^[0-9a-f]{64}$"
+    },
+    "timestamp": {
+      "type": "string",
+      "format": "date-time"
+    },
+    "nullable_integer": {"type": ["integer", "null"]},
+    "nullable_number": {"type": ["number", "null"]},
+    "nullable_string": {"type": ["string", "null"]},
+    "nullable_nonnegative_number": {
+      "type": ["number", "null"],
+      "minimum": 0
+    },
+    "string_array": {
+      "type": "array",
+      "items": {"type": "string"}
+    },
+    "artifact": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "path",
+        "compression",
+        "uncompressed_bytes",
+        "compressed_bytes",
+        "content_sha256",
+        "artifact_sha256"
+      ],
+      "properties": {
+        "path": {"type": "string", "minLength": 1},
+        "compression": {"const": "gzip"},
+        "uncompressed_bytes": {"type": "integer", "minimum": 0},
+        "compressed_bytes": {"type": "integer", "minimum": 0},
+        "content_sha256": {"$ref": "#/$defs/sha256"},
+        "artifact_sha256": {"$ref": "#/$defs/sha256"}
+      }
+    },
+    "measurement": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["unit", "samples", "average", "deviation_percent", "sample_count"],
+      "properties": {
+        "unit": {"enum": ["MB/s", "IOPS"]},
+        "samples": {
+          "type": "array",
+          "items": {"type": "number"},
+          "minItems": 1
+        },
+        "average": {"type": "number"},
+        "deviation_percent": {"type": "number", "minimum": 0},
+        "sample_count": {"type": "integer", "minimum": 1}
+      }
+    },
+    "nullable_measurement": {
+      "oneOf": [
+        {"$ref": "#/$defs/measurement"},
+        {"type": "null"}
+      ]
+    },
+    "test_result": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "step",
+        "command",
+        "started_at",
+        "finished_at",
+        "duration_seconds",
+        "exit_code",
+        "execution_status",
+        "collection_status",
+        "outcome",
+        "parser",
+        "metrics",
+        "warnings",
+        "artifacts"
+      ],
+      "properties": {
+        "step": {"type": "string", "minLength": 1},
+        "command": {"type": "string", "minLength": 1},
+        "started_at": {
+          "oneOf": [
+            {"$ref": "#/$defs/timestamp"},
+            {"type": "null"}
+          ]
+        },
+        "finished_at": {
+          "oneOf": [
+            {"$ref": "#/$defs/timestamp"},
+            {"type": "null"}
+          ]
+        },
+        "duration_seconds": {"$ref": "#/$defs/nullable_nonnegative_number"},
+        "exit_code": {"type": ["integer", "null"]},
+        "execution_status": {
+          "enum": [
+            "pending",
+            "running",
+            "completed",
+            "failed",
+            "interrupted",
+            "launch_failed"
+          ]
+        },
+        "collection_status": {
+          "enum": ["pending", "complete", "partial", "parser_error"]
+        },
+        "outcome": {"enum": ["pass", "fail", "unknown"]},
+        "parser": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["name", "version"],
+          "properties": {
+            "name": {
+              "enum": [
+                "nvme_smart",
+                "nvme_device_self_test",
+                "nvme_self_test_log",
+                "pts_fio",
+                "memtester",
+                "stressapptest",
+                "stress_ng",
+                "sysbench",
+                "pts_stream",
+                "cuda_memtest",
+                "gpu_burn",
+                "nvbandwidth"
+              ]
+            },
+            "version": {"type": "integer", "minimum": 1}
+          }
+        },
+        "metrics": {
+          "oneOf": [
+            {"type": "null"},
+            {"$ref": "#/$defs/nvme_smart_metrics"},
+            {"$ref": "#/$defs/nvme_device_self_test_metrics"},
+            {"$ref": "#/$defs/nvme_self_test_log_metrics"},
+            {"$ref": "#/$defs/pts_fio_metrics"},
+            {"$ref": "#/$defs/memtester_metrics"},
+            {"$ref": "#/$defs/stressapptest_metrics"},
+            {"$ref": "#/$defs/stress_ng_metrics"},
+            {"$ref": "#/$defs/sysbench_metrics"},
+            {"$ref": "#/$defs/pts_stream_metrics"},
+            {"$ref": "#/$defs/cuda_memtest_metrics"},
+            {"$ref": "#/$defs/gpu_burn_metrics"},
+            {"$ref": "#/$defs/nvbandwidth_metrics"}
+          ]
+        },
+        "warnings": {"$ref": "#/$defs/string_array"},
+        "artifacts": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "stdout": {"$ref": "#/$defs/artifact"},
+            "stderr": {"$ref": "#/$defs/artifact"}
+          }
+        }
+      }
+    },
+    "nvme_smart_metrics": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "kind", "device", "critical_warning", "temperature_kelvin",
+        "temperature_celsius", "available_spare_percent", "spare_threshold_percent",
+        "percentage_used", "data_units_read", "data_units_written", "power_cycles",
+        "power_on_hours", "unsafe_shutdowns", "media_errors", "error_log_entries",
+        "warning_temperature_time_minutes", "critical_temperature_time_minutes",
+        "temperature_sensor_1_kelvin", "temperature_sensor_2_kelvin", "health_reasons"
+      ],
+      "properties": {
+        "kind": {"const": "nvme_smart"},
+        "device": {"type": "string"},
+        "critical_warning": {"$ref": "#/$defs/nullable_integer"},
+        "temperature_kelvin": {"$ref": "#/$defs/nullable_integer"},
+        "temperature_celsius": {"$ref": "#/$defs/nullable_number"},
+        "available_spare_percent": {"$ref": "#/$defs/nullable_integer"},
+        "spare_threshold_percent": {"$ref": "#/$defs/nullable_integer"},
+        "percentage_used": {"$ref": "#/$defs/nullable_integer"},
+        "data_units_read": {"$ref": "#/$defs/nullable_integer"},
+        "data_units_written": {"$ref": "#/$defs/nullable_integer"},
+        "power_cycles": {"$ref": "#/$defs/nullable_integer"},
+        "power_on_hours": {"$ref": "#/$defs/nullable_integer"},
+        "unsafe_shutdowns": {"$ref": "#/$defs/nullable_integer"},
+        "media_errors": {"$ref": "#/$defs/nullable_integer"},
+        "error_log_entries": {"$ref": "#/$defs/nullable_integer"},
+        "warning_temperature_time_minutes": {"$ref": "#/$defs/nullable_integer"},
+        "critical_temperature_time_minutes": {"$ref": "#/$defs/nullable_integer"},
+        "temperature_sensor_1_kelvin": {"$ref": "#/$defs/nullable_integer"},
+        "temperature_sensor_2_kelvin": {"$ref": "#/$defs/nullable_integer"},
+        "health_reasons": {"$ref": "#/$defs/string_array"}
+      }
+    },
+    "nvme_device_self_test_metrics": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "kind", "device", "test_type", "started", "maximum_progress_percent",
+        "completion_marker_found", "failure_marker_found"
+      ],
+      "properties": {
+        "kind": {"const": "nvme_device_self_test"},
+        "device": {"type": "string"},
+        "test_type": {"enum": ["short", "extended", null]},
+        "started": {"type": "boolean"},
+        "maximum_progress_percent": {"$ref": "#/$defs/nullable_integer"},
+        "completion_marker_found": {"type": "boolean"},
+        "failure_marker_found": {"type": "boolean"}
+      }
+    },
+    "nvme_latest_report": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "result_code", "test_code", "segment_number", "valid_diagnostic_information",
+        "power_on_hours", "vendor_specific"
+      ],
+      "properties": {
+        "result_code": {"$ref": "#/$defs/nullable_integer"},
+        "test_code": {"$ref": "#/$defs/nullable_integer"},
+        "segment_number": {"$ref": "#/$defs/nullable_integer"},
+        "valid_diagnostic_information": {"$ref": "#/$defs/nullable_integer"},
+        "power_on_hours": {"$ref": "#/$defs/nullable_integer"},
+        "vendor_specific": {"$ref": "#/$defs/nullable_integer"}
+      }
+    },
+    "nvme_self_test_log_metrics": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "kind", "device", "current_operation", "current_completion_percent",
+        "valid_report_count", "latest_report"
+      ],
+      "properties": {
+        "kind": {"const": "nvme_self_test_log"},
+        "device": {"type": "string"},
+        "current_operation": {"$ref": "#/$defs/nullable_integer"},
+        "current_completion_percent": {"$ref": "#/$defs/nullable_integer"},
+        "valid_report_count": {"type": "integer", "minimum": 0},
+        "latest_report": {"$ref": "#/$defs/nvme_latest_report"}
+      }
+    },
+    "fio_configuration": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "workload", "engine", "buffered", "direct", "block_size", "disk_target",
+        "throughput", "iops"
+      ],
+      "properties": {
+        "workload": {"enum": ["read", "write", "randread", "randwrite"]},
+        "engine": {"type": "string"},
+        "buffered": {"$ref": "#/$defs/nullable_integer"},
+        "direct": {"$ref": "#/$defs/nullable_integer"},
+        "block_size": {"type": "string"},
+        "disk_target": {"type": "string"},
+        "throughput": {"$ref": "#/$defs/nullable_measurement"},
+        "iops": {"$ref": "#/$defs/nullable_measurement"}
+      }
+    },
+    "pts_fio_metrics": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "kind", "phoronix_test_suite_version", "profile", "tool_version",
+        "expected_configuration_count", "configuration_count", "configurations"
+      ],
+      "properties": {
+        "kind": {"const": "pts_fio"},
+        "phoronix_test_suite_version": {"$ref": "#/$defs/nullable_string"},
+        "profile": {"$ref": "#/$defs/nullable_string"},
+        "tool_version": {"$ref": "#/$defs/nullable_string"},
+        "expected_configuration_count": {"type": "integer", "minimum": 1},
+        "configuration_count": {"type": "integer", "minimum": 0},
+        "configurations": {
+          "type": "array",
+          "items": {"$ref": "#/$defs/fio_configuration"}
+        }
+      }
+    },
+    "memtester_metrics": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "kind", "requested_mb", "allocated_mb", "memory_locked", "expected_loops",
+        "declared_loops", "completed_loops", "successful_checks", "failures",
+        "completion_marker_found"
+      ],
+      "properties": {
+        "kind": {"const": "memtester"},
+        "requested_mb": {"$ref": "#/$defs/nullable_integer"},
+        "allocated_mb": {"$ref": "#/$defs/nullable_integer"},
+        "memory_locked": {"type": "boolean"},
+        "expected_loops": {"type": "integer", "minimum": 1},
+        "declared_loops": {"type": "integer", "minimum": 0},
+        "completed_loops": {"type": "integer", "minimum": 0},
+        "successful_checks": {"type": "integer", "minimum": 0},
+        "failures": {"type": "integer", "minimum": 0},
+        "completion_marker_found": {"type": "boolean"}
+      }
+    },
+    "stressapptest_metrics": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "kind", "reported_status", "configured_memory_mb", "processed_mb",
+        "reported_duration_seconds", "throughput_mb_per_second",
+        "memory_copy_mb_per_second", "hardware_incidents", "errors"
+      ],
+      "properties": {
+        "kind": {"const": "stressapptest"},
+        "reported_status": {"enum": ["PASS", "FAIL", null]},
+        "configured_memory_mb": {"$ref": "#/$defs/nullable_integer"},
+        "processed_mb": {"$ref": "#/$defs/nullable_number"},
+        "reported_duration_seconds": {"$ref": "#/$defs/nullable_number"},
+        "throughput_mb_per_second": {"$ref": "#/$defs/nullable_number"},
+        "memory_copy_mb_per_second": {"$ref": "#/$defs/nullable_number"},
+        "hardware_incidents": {"$ref": "#/$defs/nullable_integer"},
+        "errors": {"$ref": "#/$defs/nullable_integer"}
+      }
+    },
+    "stress_ng_metrics": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "kind", "passed_workers", "failed_workers", "skipped_workers",
+        "metrics_untrustworthy", "completion_marker_found"
+      ],
+      "properties": {
+        "kind": {"const": "stress_ng"},
+        "passed_workers": {"$ref": "#/$defs/nullable_integer"},
+        "failed_workers": {"$ref": "#/$defs/nullable_integer"},
+        "skipped_workers": {"$ref": "#/$defs/nullable_integer"},
+        "metrics_untrustworthy": {"$ref": "#/$defs/nullable_integer"},
+        "completion_marker_found": {"type": "boolean"}
+      }
+    },
+    "sysbench_metrics": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "kind", "version", "threads", "events_per_second", "total_events",
+        "total_time_seconds", "latency_ms_min", "latency_ms_average", "latency_ms_max",
+        "latency_ms_p95", "latency_ms_sum", "events_fairness_average",
+        "events_fairness_stddev", "execution_time_fairness_average",
+        "execution_time_fairness_stddev"
+      ],
+      "properties": {
+        "kind": {"const": "sysbench"},
+        "version": {"$ref": "#/$defs/nullable_string"},
+        "threads": {"$ref": "#/$defs/nullable_integer"},
+        "events_per_second": {"$ref": "#/$defs/nullable_number"},
+        "total_events": {"$ref": "#/$defs/nullable_integer"},
+        "total_time_seconds": {"$ref": "#/$defs/nullable_number"},
+        "latency_ms_min": {"$ref": "#/$defs/nullable_number"},
+        "latency_ms_average": {"$ref": "#/$defs/nullable_number"},
+        "latency_ms_max": {"$ref": "#/$defs/nullable_number"},
+        "latency_ms_p95": {"$ref": "#/$defs/nullable_number"},
+        "latency_ms_sum": {"$ref": "#/$defs/nullable_number"},
+        "events_fairness_average": {"$ref": "#/$defs/nullable_number"},
+        "events_fairness_stddev": {"$ref": "#/$defs/nullable_number"},
+        "execution_time_fairness_average": {"$ref": "#/$defs/nullable_number"},
+        "execution_time_fairness_stddev": {"$ref": "#/$defs/nullable_number"}
+      }
+    },
+    "stream_operation": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["operation", "measurement"],
+      "properties": {
+        "operation": {"enum": ["Copy", "Scale", "Add", "Triad"]},
+        "measurement": {"$ref": "#/$defs/measurement"}
+      }
+    },
+    "pts_stream_metrics": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "kind", "phoronix_test_suite_version", "profile", "tool_version",
+        "expected_operation_count", "operation_count", "operations"
+      ],
+      "properties": {
+        "kind": {"const": "pts_stream"},
+        "phoronix_test_suite_version": {"$ref": "#/$defs/nullable_string"},
+        "profile": {"$ref": "#/$defs/nullable_string"},
+        "tool_version": {"$ref": "#/$defs/nullable_string"},
+        "expected_operation_count": {"type": "integer", "minimum": 1},
+        "operation_count": {"type": "integer", "minimum": 0},
+        "operations": {
+          "type": "array",
+          "items": {"$ref": "#/$defs/stream_operation"}
+        }
+      }
+    },
+    "cuda_memtest_metrics": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "kind", "device_name", "allocated_mb", "expected_passes", "completed_passes",
+        "finished_seconds", "reported_elapsed_times", "bandwidth_gb_per_second",
+        "reported_error_counts", "maximum_reported_errors", "completion_marker_found",
+        "failure_marker_found"
+      ],
+      "properties": {
+        "kind": {"const": "cuda_memtest"},
+        "device_name": {"$ref": "#/$defs/nullable_string"},
+        "allocated_mb": {"$ref": "#/$defs/nullable_integer"},
+        "expected_passes": {"type": "integer", "minimum": 1},
+        "completed_passes": {"type": "integer", "minimum": 0},
+        "finished_seconds": {"type": "array", "items": {"type": "number"}},
+        "reported_elapsed_times": {"type": "array", "items": {"type": "number"}},
+        "bandwidth_gb_per_second": {"type": "array", "items": {"type": "number"}},
+        "reported_error_counts": {"type": "array", "items": {"type": "integer"}},
+        "maximum_reported_errors": {"$ref": "#/$defs/nullable_integer"},
+        "completion_marker_found": {"type": "boolean"},
+        "failure_marker_found": {"type": "boolean"}
+      }
+    },
+    "gpu_device": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["gpu", "name"],
+      "properties": {
+        "gpu": {"type": "integer", "minimum": 0},
+        "name": {"type": "string"}
+      }
+    },
+    "gpu_status": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["gpu", "status"],
+      "properties": {
+        "gpu": {"type": "integer", "minimum": 0},
+        "status": {"enum": ["OK", "FAULTY", "FAILED"]}
+      }
+    },
+    "gpu_burn_metrics": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "kind", "configured_duration_seconds", "tested_gpu_count", "gpu_devices",
+        "gpu_statuses", "sample_count", "maximum_reported_errors", "gflops_min",
+        "gflops_median", "gflops_mean", "gflops_max", "gflops_final",
+        "temperature_celsius_min", "temperature_celsius_max", "temperature_celsius_final",
+        "processed_iterations_final"
+      ],
+      "properties": {
+        "kind": {"const": "gpu_burn"},
+        "configured_duration_seconds": {"$ref": "#/$defs/nullable_integer"},
+        "tested_gpu_count": {"$ref": "#/$defs/nullable_integer"},
+        "gpu_devices": {"type": "array", "items": {"$ref": "#/$defs/gpu_device"}},
+        "gpu_statuses": {"type": "array", "items": {"$ref": "#/$defs/gpu_status"}},
+        "sample_count": {"type": "integer", "minimum": 0},
+        "maximum_reported_errors": {"$ref": "#/$defs/nullable_integer"},
+        "gflops_min": {"$ref": "#/$defs/nullable_number"},
+        "gflops_median": {"$ref": "#/$defs/nullable_number"},
+        "gflops_mean": {"$ref": "#/$defs/nullable_number"},
+        "gflops_max": {"$ref": "#/$defs/nullable_number"},
+        "gflops_final": {"$ref": "#/$defs/nullable_number"},
+        "temperature_celsius_min": {"$ref": "#/$defs/nullable_number"},
+        "temperature_celsius_max": {"$ref": "#/$defs/nullable_number"},
+        "temperature_celsius_final": {"$ref": "#/$defs/nullable_number"},
+        "processed_iterations_final": {"$ref": "#/$defs/nullable_integer"}
+      }
+    },
+    "nvbandwidth_testcase": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "name", "description", "status", "sum_gb_per_second",
+        "bandwidth_matrix_gb_per_second"
+      ],
+      "properties": {
+        "name": {"$ref": "#/$defs/nullable_string"},
+        "description": {"$ref": "#/$defs/nullable_string"},
+        "status": {"$ref": "#/$defs/nullable_string"},
+        "sum_gb_per_second": {"$ref": "#/$defs/nullable_number"},
+        "bandwidth_matrix_gb_per_second": {
+          "type": "array",
+          "items": {
+            "type": "array",
+            "items": {"type": "number"}
+          }
+        }
+      }
+    },
+    "nvbandwidth_metrics": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "kind", "version", "driver_version", "cuda_driver_api_version",
+        "cuda_runtime_version", "gpu_devices", "testcases"
+      ],
+      "properties": {
+        "kind": {"const": "nvbandwidth"},
+        "version": {"$ref": "#/$defs/nullable_string"},
+        "driver_version": {"$ref": "#/$defs/nullable_string"},
+        "cuda_driver_api_version": {"$ref": "#/$defs/nullable_integer"},
+        "cuda_runtime_version": {"$ref": "#/$defs/nullable_integer"},
+        "gpu_devices": {"type": "array", "items": {"type": "string"}},
+        "testcases": {
+          "type": "array",
+          "items": {"$ref": "#/$defs/nvbandwidth_testcase"}
+        }
+      }
+    }
+  }
+}

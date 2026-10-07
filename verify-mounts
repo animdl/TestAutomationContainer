@@ -1,0 +1,71 @@
+#!/usr/bin/env bash
+
+set -euo pipefail
+
+IMAGE="${BENCH_IMAGE:-bench:latest}"
+NVME0_BENCH_PATH="${NVME0_BENCH_PATH:-/mnt/hdd/pts-bench-nvme0}"
+NVME1_BENCH_PATH="${NVME1_BENCH_PATH:-/mnt/pts-bench-nvme1}"
+
+for command_name in docker findmnt; do
+    if ! command -v "${command_name}" >/dev/null 2>&1; then
+        echo "ERROR: Required command not found: ${command_name}" >&2
+        exit 1
+    fi
+done
+
+for directory in "${NVME0_BENCH_PATH}" "${NVME1_BENCH_PATH}"; do
+    if [[ ! -d "${directory}" ]]; then
+        echo "ERROR: Benchmark directory does not exist: ${directory}" >&2
+        exit 1
+    fi
+done
+
+echo "Host filesystem for NVMe 0 benchmark directory:"
+findmnt \
+    --target "${NVME0_BENCH_PATH}" \
+    --output SOURCE,TARGET,FSTYPE,OPTIONS,MAJ:MIN,UUID
+
+echo
+echo "Host filesystem for NVMe 1 benchmark directory:"
+findmnt \
+    --target "${NVME1_BENCH_PATH}" \
+    --output SOURCE,TARGET,FSTYPE,OPTIONS,MAJ:MIN,UUID
+
+nvme0_device_number="$(findmnt --noheadings --target "${NVME0_BENCH_PATH}" --output MAJ:MIN)"
+nvme1_device_number="$(findmnt --noheadings --target "${NVME1_BENCH_PATH}" --output MAJ:MIN)"
+
+if [[ "${nvme0_device_number}" == "${nvme1_device_number}" ]]; then
+    echo >&2
+    echo "ERROR: Both benchmark directories resolve to the same filesystem device (${nvme0_device_number})." >&2
+    exit 1
+fi
+
+echo
+echo "Docker bind mounts:"
+docker run --rm --privileged \
+    --mount "type=bind,src=${NVME0_BENCH_PATH},dst=/mnt/bench/nvme0" \
+    --mount "type=bind,src=${NVME1_BENCH_PATH},dst=/mnt/bench/nvme1" \
+    "${IMAGE}" \
+    /bin/bash -lc '
+set -euo pipefail
+
+echo "NVMe 0 bind mount:"
+findmnt \
+    --mountpoint /mnt/bench/nvme0 \
+    --output SOURCE,TARGET,FSTYPE,OPTIONS,MAJ:MIN
+
+echo
+echo "NVMe 1 bind mount:"
+findmnt \
+    --mountpoint /mnt/bench/nvme1 \
+    --output SOURCE,TARGET,FSTYPE,OPTIONS,MAJ:MIN
+
+test -w /mnt/bench/nvme0
+test -w /mnt/bench/nvme1
+
+echo
+echo "Both Docker benchmark targets are writable."
+'
+
+echo
+echo "Docker benchmark mappings verified successfully."

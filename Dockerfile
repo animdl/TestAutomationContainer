@@ -3,7 +3,7 @@ FROM nvidia/cuda:${CUDA_VERSION}-devel-ubuntu24.04
 
 ARG DEBIAN_FRONTEND=noninteractive
 ARG CUDA_ARCH=89
-ARG PTS_TESTS="pts/fio pts/sysbench pts/stream"
+ARG PTS_TESTS="pts/fio-1.15.0 pts/stream"
 
 RUN apt-get update && \
     apt-get install -y --no-install-recommends \
@@ -22,7 +22,6 @@ RUN apt-get update && \
         memtester \
         stressapptest \
         stress-ng \
-        coreutils grep vim \
     && rm -rf /var/lib/apt/lists/*
 
 WORKDIR /opt
@@ -38,9 +37,16 @@ RUN set -eux; \
         /var/lib/phoronix-test-suite \
         /results; \
     phoronix-test-suite enterprise-setup; \
+    phoronix-test-suite user-config-set \
+        SaveResults=FALSE \
+        OpenBrowser=FALSE \
+        UploadResults=FALSE \
+        PromptForTestIdentifier=FALSE \
+        PromptForTestDescription=FALSE \
+        PromptSaveName=FALSE \
+        RunAllTestCombinations=FALSE \
+        Configured=TRUE; \
     phoronix-test-suite batch-install ${PTS_TESTS}
-
-COPY fio-safe.fio /opt/benchmarks/fio-safe.fio
 
 RUN set -eux; \
     git clone --depth=1 https://github.com/wilicc/gpu-burn.git /opt/gpu-burn; \

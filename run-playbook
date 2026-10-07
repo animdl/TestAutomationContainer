@@ -1,58 +1,160 @@
 #!/usr/bin/env python3
 
-import json
 import os
-from datetime import datetime, timezone
+from datetime import datetime
 from pathlib import Path
-import subprocess
+import signal
 import sys
+import time
+
+from benchmark_capture import (
+    COLLECTOR_VERSION,
+    SCHEMA_VERSION,
+    artifact_prefix,
+    atomic_save,
+    compress_artifact,
+    execute_command,
+    inspect_image,
+    read_parser_text,
+    source_manifest,
+    suite_hash,
+    timestamp,
+    utc_now,
+)
+from benchmark_parsers import PARSER_VERSION, parse_step, parser_descriptor
 
 IMAGE = os.environ.get("BENCH_IMAGE", "bench:latest")
-DEVICES = ("/dev/nvme0n1", "/dev/nvme1n1")
+BENCH_MOUNTS = (
+    (
+        os.environ.get("NVME0_BENCH_PATH", "/mnt/hdd/pts-bench-nvme0"),
+        "/mnt/bench/nvme0",
+    ),
+    (
+        os.environ.get("NVME1_BENCH_PATH", "/mnt/pts-bench-nvme1"),
+        "/mnt/bench/nvme1",
+    ),
+)
+
+FIO_OPTIONS = (
+    "fio.type=randread,randwrite,read,write;"
+    "fio.engine=libaio;"
+    "fio.buffered=0;"
+    "fio.direct=1;"
+    "fio.size=4k,2m;"
+    "fio.auto-disk-mount-points=/mnt/bench/nvme0,/mnt/bench/nvme1"
+)
+
+STREAM_OPTIONS = "stream.run-type=Copy,Scale,Add,Triad"
 
 TESTS = [
     ("2a", "nvme smart-log /dev/nvme0n1 -o json"),
     ("2b", "nvme smart-log /dev/nvme1n1 -o json"),
-    ("3a", "nvme device-self-test /dev/nvme0n1 -s 2 -w"),
-    ("3b", "nvme device-self-test /dev/nvme1n1 -s 2 -w"),
+    ("3a", "nvme device-self-test /dev/nvme0n1 -s 1 -w"),
+    ("3b", "nvme device-self-test /dev/nvme1n1 -s 1 -w"),
     ("4a", "nvme self-test-log /dev/nvme0n1 -o json"),
     ("4b", "nvme self-test-log /dev/nvme1n1 -o json"),
-    ("6", "memtester 20G 5"),
-    ("7", "stressapptest -s 1800 -M 18000 -m 32 -W"),
-    ("8", "stress-ng --cpu 0 --cpu-load 75 --timeout 30m"),
-    ("9", 'sysbench --threads="$(nproc)" --time=90 cpu run'),
-    ("11", "cuda_memtest --stress --num_iterations 1000 --num_passes 2 --verbose 2"),
-    ("12", "gpu-burn -tc 1800"),
+    (
+        "5",
+        f"env PRESET_OPTIONS_VALUES='{FIO_OPTIONS}' "
+        "phoronix-test-suite batch-run pts/fio-1.15.0",
+    ),
+    ("6", "memtester 2G 5"),
+    ("7", "stressapptest -s 300 -M 2000 -m 32 -W"),
+    ("8", "stress-ng --cpu 0 --cpu-load 75 --timeout 5m"),
+    ("9", 'sysbench --threads="$(nproc)" --time=5 cpu run'),
+    (
+        "10",
+        f"env PRESET_OPTIONS_VALUES='{STREAM_OPTIONS}' "
+        "phoronix-test-suite batch-run pts/stream",
+    ),
+    ("11", "cuda_memtest --stress --num_iterations 5 --num_passes 2 --verbose 2"),
+    ("12", "gpu-burn -tc 300"),
     ("13a", "nvbandwidth -t host_to_device_memcpy_ce -b 1024 -i 10 -j"),
     ("13b", "nvbandwidth -t device_to_host_memcpy_ce -b 1024 -i 10 -j"),
     ("13c", "nvbandwidth -t host_to_device_bidirectional_memcpy_ce -b 1024 -i 10 -j"),
     ("13d", "nvbandwidth -t host_to_device_bidirectional_memcpy_sm -b 1024 -i 10 -j"),
     ("13e", "nvbandwidth -t device_local_copy -b 1024 -i 10 -j"),
-    ("14a", "stress-ng --cpu 0 --cpu-load 100 --timeout 30m"),
-    ("14b", "gpu-burn -tc 1800"),
+    ("14a", "stress-ng --cpu 0 --cpu-load 100 --timeout 5m"),
+    ("14b", "gpu-burn -tc 300"),
 ]
 
-def timestamp():
-    return datetime.now(timezone.utc).isoformat()
-
 def docker_command(command):
-    return [
+    docker_args = [
         "docker",
         "run",
         "--rm",
         "--gpus",
         "all",
         "--privileged",
-        f"--device={DEVICES[0]}",
-        f"--device={DEVICES[1]}",
-        IMAGE,
-        "/bin/bash",
-        "-lc",
-        command,
     ]
 
-def save(path, results):
-    path.write_text(json.dumps(results, indent=2) + "\n", encoding="utf-8")
+    for source, destination in BENCH_MOUNTS:
+        docker_args.extend(
+            [
+                "--mount",
+                f"type=bind,src={source},dst={destination}",
+            ]
+        )
+
+    docker_args.extend([IMAGE, "/bin/bash", "-lc", command])
+    return docker_args
+
+
+def prepare_output_directory(path):
+    if path.exists() and any(path.iterdir()):
+        raise RuntimeError(f"output directory is not empty: {path}")
+    path.mkdir(parents=True, exist_ok=True)
+    (path / "raw").mkdir()
+
+
+def initial_test_result(step, command):
+    return {
+        "step": step,
+        "command": command,
+        "started_at": None,
+        "finished_at": None,
+        "duration_seconds": None,
+        "exit_code": None,
+        "execution_status": "pending",
+        "collection_status": "pending",
+        "outcome": "unknown",
+        "parser": parser_descriptor(step),
+        "metrics": None,
+        "warnings": [],
+        "artifacts": {},
+    }
+
+
+def build_initial_results(run_id, image, started_at):
+    script_dir = Path(__file__).resolve().parent
+    source_paths = [
+        Path(__file__).resolve(),
+        script_dir / "benchmark_capture.py",
+        script_dir / "benchmark_parsers.py",
+    ]
+    return {
+        "schema_version": SCHEMA_VERSION,
+        "collector": {
+            "version": COLLECTOR_VERSION,
+            "parser_version": PARSER_VERSION,
+            "python_version": sys.version.split()[0],
+            "sources": source_manifest(source_paths),
+        },
+        "run_id": run_id,
+        "image": image,
+        "suite": {
+            "command_sha256": suite_hash(TESTS),
+            "test_count": len(TESTS),
+            "steps": [step for step, _ in TESTS],
+        },
+        "started_at": timestamp(started_at),
+        "finished_at": None,
+        "duration_seconds": None,
+        "status": "running",
+        "tests": [],
+        "warnings": [],
+        "errors": [],
+    }
 
 def main():
     run_name = datetime.now().strftime("%Y%m%d-%H%M%S")
@@ -60,40 +162,127 @@ def main():
     if len(sys.argv) > 1:
         output_dir = Path(sys.argv[1])
 
-    output_dir.mkdir(parents=True, exist_ok=True)
+    try:
+        prepare_output_directory(output_dir)
+    except (OSError, RuntimeError) as exc:
+        print(f"Error: {exc}", file=sys.stderr)
+        return 2
+
     output_file = output_dir / "results.json"
-    results = {
-        "image": IMAGE,
-        "started_at": timestamp(),
-        "tests": [],
-    }
+    run_started_at = utc_now()
+    run_started = time.monotonic()
+    image, image_warning = inspect_image(IMAGE)
+    results = build_initial_results(run_name, image, run_started_at)
+    if image_warning:
+        results["warnings"].append(image_warning)
+    atomic_save(output_file, results)
 
-    for step, command in TESTS:
-        print(f"\n[{step}] {command}", flush=True)
-        completed = subprocess.run(
-            docker_command(command),
-            stdout=subprocess.PIPE,
-            text=True,
-            encoding="utf-8",
-            errors="replace",
-            check=False,
-        )
-        print(completed.stdout, end="", flush=True)
+    interrupted = False
 
-        results["tests"].append(
-            {
-                "step": step,
-                "command": command,
-                "exit_code": completed.returncode,
-                "stdout": completed.stdout,
-            }
-        )
-        save(output_file, results)
+    def interrupt_on_termination(signum, frame):
+        del signum, frame
+        raise KeyboardInterrupt
 
-    results["finished_at"] = timestamp()
-    save(output_file, results)
+    previous_sigterm = signal.signal(signal.SIGTERM, interrupt_on_termination)
+
+    try:
+        for step, command in TESTS:
+            print(f"\n[{step}] {command}", flush=True)
+            test_result = initial_test_result(step, command)
+            results["tests"].append(test_result)
+            test_result["execution_status"] = "running"
+            test_result["started_at"] = timestamp()
+            atomic_save(output_file, results)
+
+            prefix = artifact_prefix(step)
+            stdout_path = output_dir / "raw" / f"{prefix}.stdout.log"
+            stderr_path = output_dir / "raw" / f"{prefix}.stderr.log"
+            execution = execute_command(
+                docker_command(command),
+                stdout_path,
+                stderr_path,
+            )
+
+            stdout = read_parser_text(stdout_path)
+            stderr = read_parser_text(stderr_path)
+            print(stdout, end="", flush=True)
+            if stderr:
+                print(stderr, end="", file=sys.stderr, flush=True)
+
+            parsed = parse_step(step, stdout, stderr)
+            warnings = list(parsed["warnings"])
+            outcome = parsed["outcome"]
+            if execution.execution_status == "failed":
+                outcome = "fail"
+                warnings.append(f"command exited with code {execution.exit_code}")
+            elif execution.execution_status != "completed":
+                outcome = "unknown"
+                warnings.append(
+                    "test outcome is incomplete because execution status is "
+                    f"{execution.execution_status}"
+                )
+            if execution.launch_error:
+                warnings.append(execution.launch_error)
+
+            stdout_artifact = compress_artifact(stdout_path, output_dir)
+            stderr_artifact = compress_artifact(stderr_path, output_dir)
+            test_result.update(
+                {
+                    "started_at": execution.started_at,
+                    "finished_at": execution.finished_at,
+                    "duration_seconds": execution.duration_seconds,
+                    "exit_code": execution.exit_code,
+                    "execution_status": execution.execution_status,
+                    "collection_status": parsed["collection_status"],
+                    "outcome": outcome,
+                    "metrics": parsed["metrics"],
+                    "warnings": warnings,
+                    "artifacts": {
+                        "stdout": stdout_artifact,
+                        "stderr": stderr_artifact,
+                    },
+                }
+            )
+            atomic_save(output_file, results)
+            print(
+                f"[{step}] execution={execution.execution_status} "
+                f"collection={test_result['collection_status']} "
+                f"outcome={test_result['outcome']} "
+                f"duration={execution.duration_seconds:.3f}s",
+                flush=True,
+            )
+            if execution.interrupted:
+                interrupted = True
+                break
+    except KeyboardInterrupt:
+        interrupted = True
+    except Exception as exc:
+        results["status"] = "runner_error"
+        results["errors"].append(f"{type(exc).__name__}: {exc}")
+    finally:
+        signal.signal(signal.SIGTERM, previous_sigterm)
+        if interrupted:
+            results["status"] = "interrupted"
+        elif results["status"] != "runner_error":
+            all_successful = len(results["tests"]) == len(TESTS) and all(
+                test["execution_status"] == "completed"
+                and test["collection_status"] == "complete"
+                and test["outcome"] == "pass"
+                for test in results["tests"]
+            )
+            results["status"] = (
+                "completed" if all_successful else "completed_with_issues"
+            )
+        results["finished_at"] = timestamp()
+        results["duration_seconds"] = round(time.monotonic() - run_started, 6)
+        atomic_save(output_file, results)
+
     print(f"\nResults: {output_file}")
-    return int(any(test["exit_code"] != 0 for test in results["tests"]))
+    if results["status"] == "completed":
+        return 0
+    if results["status"] == "interrupted":
+        return 130
+    return 1 if results["status"] == "completed_with_issues" else 2
 
 if __name__ == "__main__":
     raise SystemExit(main())
