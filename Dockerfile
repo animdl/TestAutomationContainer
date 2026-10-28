@@ -33,9 +33,7 @@ RUN set -eux; \
 ENV PTS_USER_PATH_OVERRIDE=/var/lib/phoronix-test-suite
 
 RUN set -eux; \
-    mkdir -p \
-        /var/lib/phoronix-test-suite \
-        /results; \
+    mkdir -p /var/lib/phoronix-test-suite; \
     phoronix-test-suite enterprise-setup; \
     phoronix-test-suite user-config-set \
         SaveResults=FALSE \
@@ -52,8 +50,7 @@ RUN set -eux; \
     git clone --depth=1 https://github.com/wilicc/gpu-burn.git /opt/gpu-burn; \
     make -C /opt/gpu-burn COMPUTE="${CUDA_ARCH}"; \
     printf '#!/bin/sh\ncd /opt/gpu-burn\nexec ./gpu_burn "$@"\n' > /usr/local/bin/gpu-burn; \
-    chmod +x /usr/local/bin/gpu-burn; \
-    ln -s /usr/local/bin/gpu-burn /usr/local/bin/gpu_burn
+    chmod +x /usr/local/bin/gpu-burn
 
 RUN set -eux; \
     git clone --depth=1 https://github.com/NVIDIA/nvbandwidth.git /opt/nvbandwidth-src; \
@@ -64,11 +61,9 @@ RUN set -eux; \
 
 RUN set -eux; \
     git clone --depth=1 https://github.com/ComputationalRadiationPhysics/cuda_memtest.git /opt/cuda_memtest-src; \
-    mkdir -p /opt/cuda_memtest-src/build; \
-    cd /opt/cuda_memtest-src/build; \
-    cmake -DCMAKE_CUDA_ARCHITECTURES="${CUDA_ARCH}" ..; \
-    make -j "$(nproc)"; \
-    chmod +x /opt/cuda_memtest-src/build/cuda_memtest; \
+    cmake -S /opt/cuda_memtest-src -B /opt/cuda_memtest-src/build \
+        -DCMAKE_CUDA_ARCHITECTURES="${CUDA_ARCH}"; \
+    cmake --build /opt/cuda_memtest-src/build -j "$(nproc)"; \
     install -m 0755 /opt/cuda_memtest-src/build/cuda_memtest /usr/local/bin/cuda_memtest
 
 WORKDIR /root

@@ -1,166 +1,113 @@
 # Workstation Benchmark Container
 
-## Misc Docker commands
+Runs 21 sequential NVMe, RAM, CPU, and NVIDIA GPU checks in Docker. Results and
+compressed logs are saved on the host.
+
+## Requirements
+
+Run the commands below in Bash on the Linux workstation, from the repository root.
+
+- Docker with NVIDIA GPU support and a working host NVIDIA driver.
+- Host Python 3.10+, Bash, and `findmnt`. The runner needs no Python packages.
+- Two mounted NVMe filesystems with dedicated benchmark directories.
+- Internet access to build the image.
+
+The suite uses privileged containers, writes benchmark files, and applies heavy
+hardware load. Verify the target drives before running it.
+
+## 1. Build
 
 ```bash
-# list images
-docker images
+export BENCH_IMAGE=bench:latest
+docker build -t "$BENCH_IMAGE" .
 
-# list running containers
-docker ps
-
-# list all containers
-docker ps -a
-
-# build/normal image rebuild
-docker build -t <image_name>:latest .
-
-# Force clean image rebuild
-docker build --no-cache -t <image_name>:latest .
-
-# open shell in already running container
-docker exec -it <container_name> bash
-
-# stop/remove container
-docker rm -f <container_id>
-
-# remove image
-docker rmi <image_id>
-
-# clean stopped containers
-docker container prune
-
-# clean dangling images
-docker image prune
+docker run --rm --gpus all "$BENCH_IMAGE" nvidia-smi
+docker run --rm "$BENCH_IMAGE" phoronix-test-suite list-installed-tests
 ```
 
-## Run Container
+Defaults: Ubuntu 24.04, CUDA 12.6.3, CUDA architecture `89`. Set `CUDA_VERSION`
+and `CUDA_ARCH` through Docker's `--build-arg` if needed for your GPU.
 
-Run interactive shell with GPU access, privileged hardware access, and NVMe devices exposed:
+FIO uses the pinned `pts/fio-1.15.0` profile. STREAM and downloaded Git sources
+are unpinned, so rebuilding can change tools. Keep the image and workloads
+consistent when comparing runs.
+
+## 2. Verify mounts
+
+Mount the intended filesystems first. Adjust these host paths to match your setup:
 
 ```bash
-docker run -it --name <container_name> --gpus all --privileged \
-  --mount type=bind,src=/mnt/hdd/pts-bench-nvme0,dst=/mnt/bench/nvme0 \
-  --mount type=bind,src=/mnt/pts-bench-nvme1,dst=/mnt/bench/nvme1 \
-  <image_name>:latest
+lsblk -o NAME,TYPE,SIZE,FSTYPE,MOUNTPOINTS
+
+export NVME0_BENCH_PATH=/mnt/hdd/pts-bench-nvme0
+export NVME1_BENCH_PATH=/mnt/pts-bench-nvme1
+sudo mkdir -p "$NVME0_BENCH_PATH" "$NVME1_BENCH_PATH"
+
+bash ./verify-mounts
 ```
 
-## Run Benchmark Playbook
+The paths default to those shown above and map to `/mnt/bench/nvme0` and
+`/mnt/bench/nvme1` inside containers. Verification checks that they use different
+filesystem devices and are writable inside Docker. It does not prove that they
+belong to different physical drives. The runner does not invoke this check.
 
-By default, the playbook expects two writable benchmark directories:
+NVMe health and self-test commands separately target `/dev/nvme0n1` and
+`/dev/nvme1n1`. If your device names differ, edit `NVME0_DEVICE` and `NVME1_DEVICE`
+in `run-playbook`. Changing the directory variables does not change these devices.
 
-- `/mnt/hdd/pts-bench-nvme0` on the first NVMe filesystem
-- `/mnt/pts-bench-nvme1` on the second NVMe filesystem
+## 3. Run
 
-Build the default image and run the benchmark sequence:
+In the same shell, after mount verification succeeds:
 
 ```bash
-docker build -t bench:latest .
-chmod +x ./verify-docker-mappings.sh
-./verify-docker-mappings.sh
 python3 ./run-playbook
 ```
 
-The mapping verification script confirms that the two host directories resolve
-to different filesystem devices, checks the Docker bind mounts, and verifies
-that both container targets are writable.
+Run on the host, keeping `run-playbook`, `benchmark_capture.py`, and
+`benchmark_parsers.py` together. `BENCH_IMAGE` defaults to `bench:latest`.
 
-To use a different image or host mount paths:
-
-```bash
-BENCH_IMAGE=<image_name>:latest \
-NVME0_BENCH_PATH=/different/nvme0/directory \
-NVME1_BENCH_PATH=/different/nvme1/directory \
-python3 ./run-playbook
-```
-
-Step 5 runs `pts/fio-1.15.0` against both mounted filesystems. It
-creates or reuses a 1 GiB file named `fiofile` under each benchmark
-directory and includes write workloads. Use dedicated benchmark
-directories.
-
-Step 10 runs all four `pts/stream` operations: Copy, Scale, Add, and
-Triad.
-
-Results are written to:
-
-```text
-benchmark-results/<timestamp>/
-├── results.json
-└── raw/
-    ├── 02a.stdout.log.gz
-    ├── 02a.stderr.log.gz
-    └── ...
-```
-
-`results.json` contains compact, structured metrics rather than complete command
-output. Every test retains its raw stdout and stderr as deterministic gzip
-artifacts under `raw/`. Artifact paths, compressed and uncompressed sizes, and
-SHA-256 hashes are recorded in the JSON. The output contract is documented by
-`results.schema.json`.
-
-Execution, collection, and test outcome are reported separately:
-
-- `execution_status` describes whether the command completed.
-- `collection_status` describes whether its expected output was parsed fully.
-- `outcome` is `pass`, `fail`, or `unknown` based on explicit health or
-  completion markers. Benchmark values are not assigned regression thresholds.
-
-The collector implementation is split across:
-
-- `run-playbook` for the benchmark definitions and orchestration
-- `benchmark_capture.py` for raw artifact capture and atomic result writes
-- `benchmark_parsers.py` for tool-specific filtering
-
-Keep all three Python files together when copying the runner. Their hashes are
-recorded in every result file.
-
-An alternative output directory can be supplied as the first argument:
+Results default to `benchmark-results/YYYYMMDD-HHMMSS/`. To use another new or
+empty directory instead:
 
 ```bash
-python3 ./run-playbook /path/to/output-directory
+python3 ./run-playbook ./benchmark-results/manual-run-001
 ```
 
-The supplied output directory must be new or empty.
+Every invocation runs the full sequence; there is no resume or step selection.
+Fixed-duration stress tests take about 25 minutes, plus the other tests. Tool
+output appears after each command finishes. Individual test failures generally
+allow later steps to run; cancellation and runner errors stop the sequence.
 
-The FIO workload remains pinned to `pts/fio-1.15.0` (FIO 3.29). Newer major or
-minor Phoronix profile versions change workload behavior and must start a new
-performance baseline rather than being compared directly with these results.
+| Steps | Checks |
+| --- | --- |
+| 2a–4b | SMART health, short self-tests, and self-test logs for both NVMe devices. |
+| 5 | FIO: random/sequential reads and writes, direct I/O, 4 KiB/2 MiB blocks, both filesystems; 16 configurations. |
+| 6–7 | `memtester`: 2 GiB, five loops; `stressapptest`: 2000 MB, 300 seconds. |
+| 8–10 | CPU stress at 75% for five minutes, a five-second sysbench CPU test, and STREAM Copy/Scale/Add/Triad. |
+| 11–12 | CUDA memory stress: five iterations, two passes; GPU burn: five minutes. |
+| 13a–13e | Five host/device and device-local bandwidth tests. |
+| 14a–14b | CPU stress at 100% for five minutes, then GPU burn for five minutes. |
 
-## Verify Result Parsers
+All workloads are sequential, including the final CPU and GPU stress tests.
 
-Run the parser and collection tests against the checked-in captured run:
+## Results
 
-```bash
-python3 -m unittest discover -s tests -v
-```
+Each run produces `results.json` and `raw/*.stdout.log.gz` / `raw/*.stderr.log.gz`.
+The JSON contains metrics, warnings, timings, image/source identities, and log
+sizes and hashes. Its format is defined by `results.schema.json` (version 3).
 
-## Verify Tools Installed
+- `execution_status`: command execution state.
+- `collection_status`: parsing completeness.
+- `outcome`: `pass`, `fail`, or `unknown`; no performance regression thresholds.
 
-Verify commands exist in image:
+Unavailable bandwidth rows are represented by empty lists with warnings.
+Results are checkpointed during execution; interrupted collection can leave
+unfinished records and uncompressed logs. Cancellation attempts to remove the
+active container; cleanup failures are recorded in warnings and stderr.
 
-```bash
-docker run --rm --gpus all <image_name>:latest bash -lc '
-set -e
-command -v phoronix-test-suite
-command -v nvme
-command -v memtester
-command -v stressapptest
-command -v stress-ng
-command -v gpu-burn
-command -v nvbandwidth
-command -v cuda_memtest
-'
-```
-
-Verify Phoronix tests were installed:
-
-```bash
-docker run --rm <image_name>:latest phoronix-test-suite list-installed-tests
-```
-
-Verify GPU visible inside container:
-
-```bash
-docker run --rm --gpus all <image_name>:latest nvidia-smi
-```
+| Exit code | Meaning |
+| --- | --- |
+| `0` | All commands completed, parsed fully, and passed. |
+| `1` | Sequence finished with issues. |
+| `2` | Handled setup or runner error. |
+| `130` | Interrupted. |

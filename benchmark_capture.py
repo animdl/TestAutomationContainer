@@ -10,12 +10,14 @@ import json
 import os
 from pathlib import Path
 import re
+import shutil
+import signal
 import subprocess
 import time
 from typing import Any, BinaryIO, Iterable
 
 
-COLLECTOR_VERSION = 1
+COLLECTOR_VERSION = 2
 SCHEMA_VERSION = 3
 
 
@@ -26,8 +28,8 @@ class ExecutionResult:
     duration_seconds: float
     exit_code: int | None
     execution_status: str
-    interrupted: bool
     launch_error: str | None = None
+    cleanup_error: str | None = None
 
 
 def utc_now() -> datetime:
@@ -102,17 +104,45 @@ def artifact_prefix(step: str) -> str:
     return f"{int(match.group(1)):02d}{match.group(2)}"
 
 
+def remove_container(container_name: str) -> str | None:
+    """Remove this step's container even if the attached Docker client was killed."""
+    previous_handlers = {}
+    try:
+        # Let cleanup finish when cancellation is requested more than once.
+        for signum in (signal.SIGINT, signal.SIGTERM):
+            previous_handlers[signum] = signal.signal(signum, signal.SIG_IGN)
+        completed = subprocess.run(
+            ["docker", "rm", "--force", container_name],
+            stdin=subprocess.DEVNULL,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            timeout=30,
+            check=False,
+        )
+        diagnostic = (completed.stderr or b"").decode("utf-8", errors="replace").strip()
+        # --rm may already have removed the container after it exited.
+        if completed.returncode and "No such container" not in diagnostic:
+            return f"container cleanup failed for {container_name}: {diagnostic or completed.returncode}"
+    except (OSError, subprocess.TimeoutExpired) as exc:
+        return f"container cleanup failed for {container_name}: {type(exc).__name__}: {exc}"
+    finally:
+        for signum, handler in previous_handlers.items():
+            signal.signal(signum, handler)
+    return None
+
+
 def execute_command(
     command: list[str],
     stdout_path: Path,
     stderr_path: Path,
+    container_name: str | None = None,
 ) -> ExecutionResult:
     started = utc_now()
     monotonic_started = time.monotonic()
     exit_code: int | None = None
     status = "launch_failed"
-    interrupted = False
     launch_error: str | None = None
+    cleanup_error: str | None = None
 
     with stdout_path.open("wb") as stdout_handle, stderr_path.open("wb") as stderr_handle:
         try:
@@ -126,8 +156,11 @@ def execute_command(
             exit_code = completed.returncode
             status = "completed" if exit_code == 0 else "failed"
         except KeyboardInterrupt:
-            interrupted = True
             status = "interrupted"
+            if container_name:
+                cleanup_error = remove_container(container_name)
+                if cleanup_error:
+                    stderr_handle.write(f"runner cleanup error: {cleanup_error}\n".encode("utf-8"))
         except OSError as exc:
             launch_error = f"{type(exc).__name__}: {exc}"
             stderr_handle.write(f"runner launch error: {launch_error}\n".encode("utf-8"))
@@ -141,8 +174,8 @@ def execute_command(
         duration_seconds=round(time.monotonic() - monotonic_started, 6),
         exit_code=exit_code,
         execution_status=status,
-        interrupted=interrupted,
         launch_error=launch_error,
+        cleanup_error=cleanup_error,
     )
 
 
@@ -153,11 +186,7 @@ def compress_stream(source: BinaryIO, destination_handle: BinaryIO) -> None:
         fileobj=destination_handle,
         mtime=0,
     ) as destination:
-        while True:
-            chunk = source.read(1024 * 1024)
-            if not chunk:
-                break
-            destination.write(chunk)
+        shutil.copyfileobj(source, destination, length=1024 * 1024)
 
 
 def compress_artifact(path: Path, output_dir: Path) -> dict[str, Any]:
@@ -192,80 +221,21 @@ def read_parser_text(path: Path) -> str:
     return path.read_bytes().decode("utf-8", errors="replace")
 
 
-def _require_fields(value: dict[str, Any], fields: set[str], label: str) -> None:
-    missing = sorted(fields - value.keys())
-    if missing:
-        raise ValueError(f"{label} missing fields: {', '.join(missing)}")
-
-
-def validate_results_shape(results: dict[str, Any]) -> None:
-    _require_fields(
-        results,
-        {
-            "schema_version",
-            "collector",
-            "run_id",
-            "image",
-            "suite",
-            "started_at",
-            "finished_at",
-            "duration_seconds",
-            "status",
-            "tests",
-            "warnings",
-            "errors",
-        },
-        "results",
-    )
-    if results["schema_version"] != SCHEMA_VERSION:
-        raise ValueError("unsupported results schema version")
-    if not isinstance(results["tests"], list):
-        raise ValueError("tests must be a list")
-    if results["suite"]["test_count"] != len(results["suite"]["steps"]):
+def validate_results_consistency(results: dict[str, Any]) -> None:
+    """Check relationships between fields; schema validation lives in tests."""
+    steps = results["suite"]["steps"]
+    if results["suite"]["test_count"] != len(steps):
         raise ValueError("suite test_count does not match steps")
-    if len(set(results["suite"]["steps"])) != len(results["suite"]["steps"]):
+    if len(set(steps)) != len(steps):
         raise ValueError("suite steps are not unique")
-
-    required_test_fields = {
-        "step",
-        "command",
-        "started_at",
-        "finished_at",
-        "duration_seconds",
-        "exit_code",
-        "execution_status",
-        "collection_status",
-        "outcome",
-        "parser",
-        "metrics",
-        "warnings",
-        "artifacts",
-    }
     for test in results["tests"]:
-        label = f"test {test.get('step', '?')}"
-        _require_fields(test, required_test_fields, label)
         if test["metrics"] is not None:
             if test["metrics"].get("kind") != test["parser"].get("name"):
-                raise ValueError(f"{label} parser and metrics kind differ")
-        for stream_name, artifact in test["artifacts"].items():
-            if stream_name not in {"stdout", "stderr"}:
-                raise ValueError(f"{label} has unknown artifact {stream_name}")
-            _require_fields(
-                artifact,
-                {
-                    "path",
-                    "compression",
-                    "uncompressed_bytes",
-                    "compressed_bytes",
-                    "content_sha256",
-                    "artifact_sha256",
-                },
-                f"{label} {stream_name} artifact",
-            )
+                raise ValueError(f"test {test['step']} parser and metrics kind differ")
 
 
 def atomic_save(path: Path, results: dict[str, Any]) -> None:
-    validate_results_shape(results)
+    validate_results_consistency(results)
     temporary = path.with_name(f".{path.name}.{os.getpid()}.tmp")
     try:
         with temporary.open("w", encoding="utf-8", newline="\n") as handle:

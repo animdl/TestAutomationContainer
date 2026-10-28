@@ -9,7 +9,7 @@ import statistics
 from typing import Any, Callable
 
 
-PARSER_VERSION = 1
+PARSER_VERSION = 2
 
 ParsedResult = dict[str, Any]
 ParserFunction = Callable[[str, str, dict[str, Any]], ParsedResult]
@@ -122,29 +122,25 @@ def parse_nvme_smart(
         "media_errors",
     )
     missing = [name for name in required if metrics[name] is None]
-    if missing:
-        return parsed_result(
-            "partial",
-            "unknown",
-            metrics,
-            [f"missing SMART values: {', '.join(missing)}"],
-        )
-
     reasons: list[str] = []
-    if metrics["critical_warning"] != 0:
+    if metrics["critical_warning"] not in (None, 0):
         reasons.append("critical warning is nonzero")
-    if metrics["media_errors"] != 0:
+    if metrics["media_errors"] not in (None, 0):
         reasons.append("media error count is nonzero")
-    if metrics["available_spare_percent"] < metrics["spare_threshold_percent"]:
+    spare = metrics["available_spare_percent"]
+    threshold = metrics["spare_threshold_percent"]
+    if spare is not None and threshold is not None and spare < threshold:
         reasons.append("available spare is below its threshold")
     metrics["health_reasons"] = reasons
 
     warnings: list[str] = []
+    if missing:
+        warnings.append(f"missing SMART values: {', '.join(missing)}")
     if metrics["error_log_entries"] not in (None, 0):
         warnings.append("NVMe error log contains entries")
     return parsed_result(
-        "complete",
-        "fail" if reasons else "pass",
+        "partial" if missing else "complete",
+        "fail" if reasons else "unknown" if missing else "pass",
         metrics,
         warnings,
     )
@@ -687,10 +683,18 @@ def parse_gpu_burn(
 ) -> ParsedResult:
     del options
     text = combined_text(stdout, stderr)
-    error_counts = [int(value) for value in re.findall(r"errors:\s*(\d+)", text)]
+    error_counts = [
+        int(value)
+        for section in re.findall(r"errors:\s*([^\r\n]*?)(?=\s+temps:|$)", text, re.M)
+        for value in re.findall(r"\b\d+\b", section)
+    ]
     gpu_statuses = re.findall(r"(?m)^\s*GPU\s+(\d+):\s+(OK|FAULTY|FAILED)\s*$", text)
     gflops = [float(value) for value in re.findall(r"\(([\d.]+) Gflop/s\)", text)]
-    temperatures = [float(value) for value in re.findall(r"temps:\s*([\d.]+) C", text)]
+    temperatures = [
+        float(value)
+        for section in re.findall(r"temps:\s*([^\r\n]*)", text)
+        for value in re.findall(r"([\d.]+) C", section)
+    ]
     processed = [int(value) for value in re.findall(r"proc'd:\s*(\d+)", text)]
     tested = re.search(r"Tested\s+(\d+) GPUs?:", text)
     burn_seconds = _number(r"Burning for\s+(\d+) seconds", text, int)
@@ -699,20 +703,29 @@ def parse_gpu_burn(
         for gpu, name in re.findall(r"(?m)^GPU\s+(\d+):\s+(.+?)\s+\(UUID:", text)
     ]
     maximum_errors = max(error_counts) if error_counts else None
+    tested_count = int(tested.group(1)) if tested else None
+    status_ids = {int(gpu) for gpu, _ in gpu_statuses}
+    device_ids = {device["gpu"] for device in devices}
+    summary_complete = (
+        tested_count is not None
+        and tested_count > 0
+        and len(gpu_statuses) == len(status_ids) == tested_count
+        and (not device_ids or device_ids == status_ids)
+    )
     all_ok = bool(gpu_statuses) and all(value == "OK" for _, value in gpu_statuses)
-    complete = tested is not None and all_ok and maximum_errors is not None
+    complete = summary_complete and maximum_errors is not None
     if any(value != "OK" for _, value in gpu_statuses) or (
         maximum_errors is not None and maximum_errors > 0
     ):
         outcome = "fail"
-    elif complete and maximum_errors == 0:
+    elif complete and all_ok and maximum_errors == 0:
         outcome = "pass"
     else:
         outcome = "unknown"
     metrics = {
         "kind": "gpu_burn",
         "configured_duration_seconds": burn_seconds,
-        "tested_gpu_count": int(tested.group(1)) if tested else None,
+        "tested_gpu_count": tested_count,
         "gpu_devices": devices,
         "gpu_statuses": [
             {"gpu": int(gpu), "status": value} for gpu, value in gpu_statuses
@@ -730,10 +743,10 @@ def parse_gpu_burn(
         "processed_iterations_final": processed[-1] if processed else None,
     }
     return parsed_result(
-        "complete" if complete or outcome == "fail" else "partial",
+        "complete" if complete else "partial",
         outcome,
         metrics,
-        [] if complete or outcome == "fail" else ["expected gpu-burn completion not found"],
+        [] if complete else ["expected gpu-burn completion not found"],
     )
 
 
@@ -746,27 +759,44 @@ def parse_nvbandwidth(
     payload = extract_json_document(stdout)
     root = payload.get("nvbandwidth") or {}
     testcases = []
+    warnings = []
     for testcase in root.get("testcases") or []:
         matrix = []
-        for row in testcase.get("bandwidth_matrix") or []:
-            matrix.append([float(value) for value in row])
+        label = testcase.get("name") or "unnamed testcase"
+        for row_index, row in enumerate(testcase.get("bandwidth_matrix") or []):
+            if not row or any(value in (None, "N/A") for value in row):
+                # An empty row preserves its GPU index without inventing values
+                # or shifting the remaining columns in the numeric-only schema.
+                matrix.append([])
+                warnings.append(f"{label}: bandwidth row {row_index} is unavailable; row omitted")
+            else:
+                matrix.append([float(value) for value in row])
+        if not matrix:
+            warnings.append(f"{label}: bandwidth matrix is missing")
+        total = testcase.get("sum")
+        if total in (None, "N/A"):
+            warnings.append(f"{label}: bandwidth sum is unavailable")
         testcases.append(
             {
                 "name": testcase.get("name"),
                 "description": testcase.get("bandwidth_description"),
                 "status": testcase.get("status"),
                 "sum_gb_per_second": (
-                    float(testcase["sum"]) if testcase.get("sum") is not None else None
+                    float(total) if total not in (None, "N/A") else None
                 ),
                 "bandwidth_matrix_gb_per_second": matrix,
             }
         )
     statuses = [testcase["status"] for testcase in testcases]
-    complete = bool(statuses) and all(status is not None for status in statuses)
-    if statuses and all(status == "Passed" for status in statuses):
-        outcome = "pass"
-    elif statuses:
+    if not statuses:
+        warnings.append("nvbandwidth did not report any testcases")
+    elif any(status is None for status in statuses):
+        warnings.append("nvbandwidth testcase status is missing")
+    complete = bool(statuses) and not warnings
+    if any(status not in (None, "Passed") for status in statuses):
         outcome = "fail"
+    elif complete:
+        outcome = "pass"
     else:
         outcome = "unknown"
     metrics = {
@@ -784,66 +814,15 @@ def parse_nvbandwidth(
         "complete" if complete else "partial",
         outcome,
         metrics,
-        [] if complete else ["nvbandwidth did not report any testcases"],
+        warnings,
     )
 
 
-PARSER_SPECS: dict[str, ParserSpec] = {
-    "2a": ParserSpec("nvme_smart", parse_nvme_smart, {"device": "/dev/nvme0n1"}),
-    "2b": ParserSpec("nvme_smart", parse_nvme_smart, {"device": "/dev/nvme1n1"}),
-    "3a": ParserSpec(
-        "nvme_device_self_test",
-        parse_nvme_device_self_test,
-        {"device": "/dev/nvme0n1"},
-    ),
-    "3b": ParserSpec(
-        "nvme_device_self_test",
-        parse_nvme_device_self_test,
-        {"device": "/dev/nvme1n1"},
-    ),
-    "4a": ParserSpec(
-        "nvme_self_test_log",
-        parse_nvme_self_test_log,
-        {"device": "/dev/nvme0n1"},
-    ),
-    "4b": ParserSpec(
-        "nvme_self_test_log",
-        parse_nvme_self_test_log,
-        {"device": "/dev/nvme1n1"},
-    ),
-    "5": ParserSpec(
-        "pts_fio",
-        parse_pts_fio,
-        {"expected_configurations": 16},
-    ),
-    "6": ParserSpec("memtester", parse_memtester, {"expected_loops": 5}),
-    "7": ParserSpec("stressapptest", parse_stressapptest),
-    "8": ParserSpec("stress_ng", parse_stress_ng),
-    "9": ParserSpec("sysbench", parse_sysbench),
-    "10": ParserSpec(
-        "pts_stream",
-        parse_pts_stream,
-        {"expected_operations": ("Copy", "Scale", "Add", "Triad")},
-    ),
-    "11": ParserSpec("cuda_memtest", parse_cuda_memtest, {"expected_passes": 2}),
-    "12": ParserSpec("gpu_burn", parse_gpu_burn),
-    "13a": ParserSpec("nvbandwidth", parse_nvbandwidth),
-    "13b": ParserSpec("nvbandwidth", parse_nvbandwidth),
-    "13c": ParserSpec("nvbandwidth", parse_nvbandwidth),
-    "13d": ParserSpec("nvbandwidth", parse_nvbandwidth),
-    "13e": ParserSpec("nvbandwidth", parse_nvbandwidth),
-    "14a": ParserSpec("stress_ng", parse_stress_ng),
-    "14b": ParserSpec("gpu_burn", parse_gpu_burn),
-}
-
-
-def parser_descriptor(step: str) -> dict[str, Any]:
-    spec = PARSER_SPECS[step]
+def parser_descriptor(spec: ParserSpec) -> dict[str, Any]:
     return {"name": spec.name, "version": PARSER_VERSION}
 
 
-def parse_step(step: str, stdout: str, stderr: str) -> ParsedResult:
-    spec = PARSER_SPECS[step]
+def parse_output(spec: ParserSpec, stdout: str, stderr: str) -> ParsedResult:
     try:
         return spec.function(stdout, stderr, spec.options)
     except Exception as exc:
