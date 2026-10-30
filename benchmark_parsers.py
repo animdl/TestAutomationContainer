@@ -2,12 +2,15 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass, field
 import json
+import logging
 import re
 import statistics
-from typing import Any, Callable
+from collections.abc import Callable
+from dataclasses import dataclass, field
+from typing import Any
 
+logger = logging.getLogger(__name__)
 
 PARSER_VERSION = 2
 
@@ -477,7 +480,7 @@ def parse_stress_ng(
     complete = successful and passed_count is not None and failed_count is not None
     if failed_count is not None and failed_count > 0:
         outcome = "fail"
-    elif complete and passed_count > 0 and failed_count == 0:
+    elif complete and passed_count is not None and passed_count > 0 and failed_count == 0:
         outcome = "pass"
     else:
         outcome = "unknown"
@@ -685,7 +688,7 @@ def parse_gpu_burn(
     text = combined_text(stdout, stderr)
     error_counts = [
         int(value)
-        for section in re.findall(r"errors:\s*([^\r\n]*?)(?=\s+temps:|$)", text, re.M)
+        for section in re.findall(r"errors:\s*([^\r\n]*?)(?=\s+temps:|$)", text, re.MULTILINE)
         for value in re.findall(r"\b\d+\b", section)
     ]
     gpu_statuses = re.findall(r"(?m)^\s*GPU\s+(\d+):\s+(OK|FAULTY|FAILED)\s*$", text)
@@ -826,6 +829,7 @@ def parse_output(spec: ParserSpec, stdout: str, stderr: str) -> ParsedResult:
     try:
         return spec.function(stdout, stderr, spec.options)
     except Exception as exc:
+        logger.exception("Parser %s failed", spec.name)
         return parsed_result(
             "parser_error",
             "unknown",

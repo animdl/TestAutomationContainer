@@ -3,7 +3,7 @@ FROM nvidia/cuda:${CUDA_VERSION}-devel-ubuntu24.04
 
 ARG DEBIAN_FRONTEND=noninteractive
 ARG CUDA_ARCH=89
-ARG PTS_TESTS="pts/fio-1.15.0 pts/stream"
+ARG PTS_TESTS="pts/fio-2.0.0 pts/stream-1.3.4 pts/stressapptest-1.0.1 pts/stress-ng-1.13.0 pts/sysbench-1.1.0"
 
 RUN apt-get update && \
     apt-get install -y --no-install-recommends \
@@ -16,12 +16,8 @@ RUN apt-get update && \
         libmysqlclient-dev \
         libboost-program-options-dev \
         pkg-config \
-        fio \
-        sysbench \
         nvme-cli \
         memtester \
-        stressapptest \
-        stress-ng \
     && rm -rf /var/lib/apt/lists/*
 
 WORKDIR /opt
@@ -45,6 +41,9 @@ RUN set -eux; \
         RunAllTestCombinations=FALSE \
         Configured=TRUE; \
     phoronix-test-suite batch-install ${PTS_TESTS}
+
+COPY combined-start /usr/local/bin/combined-start
+RUN chmod +x /usr/local/bin/combined-start
 
 RUN set -eux; \
     git clone --depth=1 https://github.com/wilicc/gpu-burn.git /opt/gpu-burn; \

@@ -1,0 +1,30 @@
+#!/bin/sh
+set -eu
+
+# Both containers share only this per-run barrier directory. PTS invokes the CPU
+# side through TEST_EXEC_PREPEND when the actual stress-ng command is ready.
+role=$1
+shift
+# PTS may include the shell's exec keyword after TEST_EXEC_PREPEND.
+if [ "${1-}" = exec ]; then
+    shift
+fi
+case "$role" in
+    cpu) peer=gpu ;;
+    gpu) peer=cpu ;;
+    *) echo "invalid combined stress role: $role" >&2; exit 2 ;;
+esac
+sync_dir=/run/benchmark-sync
+touch "$sync_dir/$role-ready"
+deadline=$(( $(date +%s) + 120 ))
+while [ ! -f "$sync_dir/$peer-ready" ]; do
+    if [ "$(date +%s)" -ge "$deadline" ]; then
+        echo "timed out waiting for combined stress $peer workload" >&2
+        exit 124
+    fi
+    sleep 0.1
+done
+if [ "$role" = gpu ]; then
+    echo "combined stress GPU starting at $(date -u +%Y-%m-%dT%H:%M:%SZ)" >&2
+fi
+exec "$@"

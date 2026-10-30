@@ -2,22 +2,23 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass
-from datetime import datetime, timezone
 import gzip
 import hashlib
 import json
 import os
-from pathlib import Path
 import re
 import shutil
 import signal
 import subprocess
 import time
-from typing import Any, BinaryIO, Iterable
+from collections.abc import Iterable, Sequence
+from contextlib import ExitStack
+from dataclasses import dataclass
+from datetime import UTC, datetime
+from pathlib import Path
+from typing import Any, BinaryIO
 
-
-COLLECTOR_VERSION = 2
+COLLECTOR_VERSION = 3
 SCHEMA_VERSION = 3
 
 
@@ -33,7 +34,7 @@ class ExecutionResult:
 
 
 def utc_now() -> datetime:
-    return datetime.now(timezone.utc)
+    return datetime.now(UTC)
 
 
 def timestamp(value: datetime | None = None) -> str:
@@ -61,7 +62,7 @@ def suite_hash(tests: list[tuple[str, str]]) -> str:
         ensure_ascii=False,
         separators=(",", ":"),
         sort_keys=True,
-    ).encode("utf-8")
+    ).encode()
     return sha256_bytes(payload)
 
 
@@ -74,8 +75,7 @@ def inspect_image(image: str) -> tuple[dict[str, Any], str | None]:
     try:
         completed = subprocess.run(
             ["docker", "image", "inspect", image],
-            stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE,
+            capture_output=True,
             timeout=60,
             check=False,
         )
@@ -114,8 +114,7 @@ def remove_container(container_name: str) -> str | None:
         completed = subprocess.run(
             ["docker", "rm", "--force", container_name],
             stdin=subprocess.DEVNULL,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE,
+            capture_output=True,
             timeout=30,
             check=False,
         )
@@ -160,10 +159,10 @@ def execute_command(
             if container_name:
                 cleanup_error = remove_container(container_name)
                 if cleanup_error:
-                    stderr_handle.write(f"runner cleanup error: {cleanup_error}\n".encode("utf-8"))
+                    stderr_handle.write(f"runner cleanup error: {cleanup_error}\n".encode())
         except OSError as exc:
             launch_error = f"{type(exc).__name__}: {exc}"
-            stderr_handle.write(f"runner launch error: {launch_error}\n".encode("utf-8"))
+            stderr_handle.write(f"runner launch error: {launch_error}\n".encode())
         finally:
             stdout_handle.flush()
             stderr_handle.flush()
@@ -177,6 +176,71 @@ def execute_command(
         launch_error=launch_error,
         cleanup_error=cleanup_error,
     )
+
+
+def execute_commands(
+    jobs: Sequence[tuple[list[str], Path, Path, str | None]],
+) -> list[ExecutionResult]:
+    """Launch a group before waiting; retain separate logs and clean up all jobs."""
+    records = [ExecutionResult(timestamp(), "", 0, None, "launch_failed") for _ in jobs]
+    processes: list[subprocess.Popen[bytes] | None] = [None] * len(jobs)
+    starts = [time.monotonic()] * len(jobs)
+    with ExitStack() as files:
+        try:
+            for i, (command, stdout_path, stderr_path, _) in enumerate(jobs):
+                starts[i] = time.monotonic()
+                record = records[i]
+                record.started_at = timestamp()
+                stdout = files.enter_context(stdout_path.open("wb"))
+                stderr = files.enter_context(stderr_path.open("wb"))
+                try:
+                    processes[i] = subprocess.Popen(
+                        command, stdin=subprocess.DEVNULL, stdout=stdout, stderr=stderr,
+                    )
+                except OSError as exc:
+                    record.launch_error = f"{type(exc).__name__}: {exc}"
+                    record.finished_at = timestamp()
+                    record.duration_seconds = round(time.monotonic() - starts[i], 6)
+                    stderr.write(f"runner launch error: {record.launch_error}\n".encode())
+
+            pending = {i: process for i, process in enumerate(processes) if process is not None}
+            while pending:
+                for i, process in list(pending.items()):
+                    code = process.poll()
+                    if code is not None:
+                        record = records[i]
+                        record.exit_code = code
+                        record.execution_status = "completed" if code == 0 else "failed"
+                        record.finished_at = timestamp()
+                        record.duration_seconds = round(time.monotonic() - starts[i], 6)
+                        del pending[i]
+                if pending:
+                    time.sleep(0.05)
+        except KeyboardInterrupt:
+            for i, record in enumerate(records):
+                if not record.finished_at:
+                    record.execution_status = "interrupted"
+                    record.finished_at = timestamp()
+                    record.duration_seconds = round(time.monotonic() - starts[i], 6)
+        finally:
+            # Stop Docker clients before removing containers to avoid a late launch.
+            # Cleanup also covers exceptions during launch or polling.
+            previous_handlers = {}
+            try:
+                for signum in (signal.SIGINT, signal.SIGTERM):
+                    previous_handlers[signum] = signal.signal(signum, signal.SIG_IGN)
+                for i, process in enumerate(processes):
+                    if process is not None and process.poll() is None:
+                        process.kill()
+                        process.wait(timeout=30)
+                    if not records[i].finished_at or records[i].execution_status == "interrupted":
+                        name = jobs[i][3]
+                        if name:
+                            records[i].cleanup_error = remove_container(name)
+            finally:
+                for signum, handler in previous_handlers.items():
+                    signal.signal(signum, handler)
+    return records
 
 
 def compress_stream(source: BinaryIO, destination_handle: BinaryIO) -> None:
@@ -229,9 +293,11 @@ def validate_results_consistency(results: dict[str, Any]) -> None:
     if len(set(steps)) != len(steps):
         raise ValueError("suite steps are not unique")
     for test in results["tests"]:
-        if test["metrics"] is not None:
-            if test["metrics"].get("kind") != test["parser"].get("name"):
-                raise ValueError(f"test {test['step']} parser and metrics kind differ")
+        if (
+            test["metrics"] is not None
+            and test["metrics"].get("kind") != test["parser"].get("name")
+        ):
+            raise ValueError(f"test {test['step']} parser and metrics kind differ")
 
 
 def atomic_save(path: Path, results: dict[str, Any]) -> None:

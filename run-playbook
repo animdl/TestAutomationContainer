@@ -1,12 +1,14 @@
 #!/usr/bin/env python3
 
+import logging
 import os
-from datetime import datetime
-from pathlib import Path
 import signal
 import sys
+import tempfile
 import time
 import uuid
+from datetime import datetime
+from pathlib import Path
 
 from benchmark_capture import (
     COLLECTOR_VERSION,
@@ -15,6 +17,7 @@ from benchmark_capture import (
     atomic_save,
     compress_artifact,
     execute_command,
+    execute_commands,
     inspect_image,
     read_parser_text,
     source_manifest,
@@ -41,6 +44,8 @@ from benchmark_parsers import (
     parser_descriptor,
 )
 
+logger = logging.getLogger(__name__)
+
 IMAGE = os.environ.get("BENCH_IMAGE", "bench:latest")
 BENCH_MOUNTS = (
     (
@@ -66,11 +71,32 @@ FIO_OPTIONS = (
     "fio.engine=libaio;"
     "fio.buffered=0;"
     "fio.direct=1;"
+    "fio.cpu-threads=1;"
     f"fio.size={','.join(FIO_BLOCK_SIZES)};"
     f"fio.auto-disk-mount-points={','.join(target for _, target in BENCH_MOUNTS)}"
 )
 
 STREAM_OPTIONS = f"stream.run-type={','.join(STREAM_OPERATIONS)}"
+
+
+def pts_command(profile, options, single_run=False):
+    runs = "FORCE_TIMES_TO_RUN=1 " if single_run else ""
+    return (
+        f"env PTS_DISPLAY_MODE=BASIC {runs}PRESET_OPTIONS_VALUES='{options}' "
+        f"phoronix-test-suite batch-run {profile}"
+    )
+
+
+def cpu_stress_command(load, combined=False):
+    # Default profile arguments precede these options, so --timeout overrides -t 30.
+    command = pts_command(
+        "pts/stress-ng",
+        f"stress-ng.test=--cpu 0 --cpu-load {load} --timeout 300",
+        single_run=True,
+    )
+    if combined:
+        command = "env TEST_EXEC_PREPEND='/usr/local/bin/combined-start cpu' " + command
+    return command
 
 # Each entry owns its step ID, command, and parser configuration.
 TESTS = [
@@ -100,8 +126,7 @@ TESTS = [
     ),
     (
         "5",
-        f"env PRESET_OPTIONS_VALUES='{FIO_OPTIONS}' "
-        "phoronix-test-suite batch-run pts/fio-1.15.0",
+        pts_command("pts/fio", FIO_OPTIONS),
         ParserSpec("pts_fio", parse_pts_fio, {
             "expected_configurations": len(FIO_WORKLOADS) * len(FIO_BLOCK_SIZES) * len(BENCH_MOUNTS),
         }),
@@ -110,13 +135,20 @@ TESTS = [
         "6", f"memtester 2G {MEMTESTER_LOOPS}",
         ParserSpec("memtester", parse_memtester, {"expected_loops": MEMTESTER_LOOPS}),
     ),
-    ("7", "stressapptest -s 300 -M 2000 -m 32 -W", ParserSpec("stressapptest", parse_stressapptest)),
-    ("8", "stress-ng --cpu 0 --cpu-load 75 --timeout 5m", ParserSpec("stress_ng", parse_stress_ng)),
-    ("9", 'sysbench --threads="$(nproc)" --time=5 cpu run', ParserSpec("sysbench", parse_sysbench)),
+    (
+        "7", pts_command("pts/stressapptest",
+                         "stressapptest.cpu-threads=32;stressapptest.ram-capacity=2000;"
+                         "stressapptest.duration=300 -W", single_run=True),
+        ParserSpec("stressapptest", parse_stressapptest),
+    ),
+    ("8", cpu_stress_command(75), ParserSpec("stress_ng", parse_stress_ng)),
+    (
+        "9", pts_command("pts/sysbench", "sysbench.run-test=--time=5 cpu", single_run=True),
+        ParserSpec("sysbench", parse_sysbench),
+    ),
     (
         "10",
-        f"env PRESET_OPTIONS_VALUES='{STREAM_OPTIONS}' "
-        "phoronix-test-suite batch-run pts/stream",
+        pts_command("pts/stream", STREAM_OPTIONS),
         ParserSpec("pts_stream", parse_pts_stream, {"expected_operations": STREAM_OPERATIONS}),
     ),
     (
@@ -135,11 +167,11 @@ TESTS = [
         ParserSpec("nvbandwidth", parse_nvbandwidth),
     ),
     ("13e", "nvbandwidth -t device_local_copy -b 1024 -i 10 -j", ParserSpec("nvbandwidth", parse_nvbandwidth)),
-    ("14a", "stress-ng --cpu 0 --cpu-load 100 --timeout 5m", ParserSpec("stress_ng", parse_stress_ng)),
-    ("14b", "gpu-burn -tc 300", ParserSpec("gpu_burn", parse_gpu_burn)),
+    ("14a", cpu_stress_command(100, combined=True), ParserSpec("stress_ng", parse_stress_ng)),
+    ("14b", "/usr/local/bin/combined-start gpu gpu-burn -tc 300", ParserSpec("gpu_burn", parse_gpu_burn)),
 ]
 
-def docker_command(command, container_name=None):
+def docker_command(command, container_name=None, sync_dir=None):
     docker_args = [
         "docker",
         "run",
@@ -150,6 +182,8 @@ def docker_command(command, container_name=None):
     ]
     if container_name:
         docker_args.extend(["--name", container_name])
+    if sync_dir:
+        docker_args.extend(["--mount", f"type=bind,src={sync_dir},dst=/run/benchmark-sync"])
 
     for source, destination in BENCH_MOUNTS:
         docker_args.extend(
@@ -220,8 +254,8 @@ def build_initial_results(run_id, image, started_at):
         "errors": [],
     }
 
-def run_step(step, command, parser, output_dir, results):
-    """Execute and collect one benchmark, retaining both result checkpoints."""
+def prepare_step(step, command, parser, output_dir, results):
+    """Checkpoint before launch, including every member of a concurrent group."""
     output_file = output_dir / "results.json"
     print(f"\n[{step}] {command}", flush=True)
     test_result = initial_test_result(step, command, parser)
@@ -232,12 +266,12 @@ def run_step(step, command, parser, output_dir, results):
     stdout_path = output_dir / "raw" / f"{prefix}.stdout.log"
     stderr_path = output_dir / "raw" / f"{prefix}.stderr.log"
     container_name = f"benchmark-{uuid.uuid4().hex}"
-    execution = execute_command(
-        docker_command(command, container_name),
-        stdout_path,
-        stderr_path,
-        container_name=container_name,
-    )
+    return test_result, stdout_path, stderr_path, container_name
+
+
+def collect_step(step, parser, output_dir, results, prepared, execution):
+    test_result, stdout_path, stderr_path, _ = prepared
+    output_file = output_dir / "results.json"
 
     stdout = read_parser_text(stdout_path)
     stderr = read_parser_text(stderr_path)
@@ -292,6 +326,31 @@ def run_step(step, command, parser, output_dir, results):
     return execution.execution_status == "interrupted"
 
 
+def run_steps(tests, output_dir, results):
+    prepared = [
+        prepare_step(step, command, parser, output_dir, results)
+        for step, command, parser in tests
+    ]
+    jobs = [
+        (docker_command(command, item[3]), item[1], item[2], item[3])
+        for (_, command, _), item in zip(tests, prepared)
+    ]
+    if len(jobs) == 1:
+        command, stdout, stderr, name = jobs[0]
+        executions = [execute_command(command, stdout, stderr, container_name=name)]
+    else:
+        with tempfile.TemporaryDirectory(prefix=".combined-", dir=output_dir.resolve()) as sync_dir:
+            jobs = [
+                (docker_command(command, item[3], sync_dir), item[1], item[2], item[3])
+                for (_, command, _), item in zip(tests, prepared)
+            ]
+            executions = execute_commands(jobs)
+    interrupted = False
+    for (step, _, parser), item, execution in zip(tests, prepared, executions):
+        interrupted |= collect_step(step, parser, output_dir, results, item, execution)
+    return interrupted
+
+
 def main():
     run_name = datetime.now().strftime("%Y%m%d-%H%M%S")
     output_dir = Path("benchmark-results") / run_name
@@ -322,13 +381,17 @@ def main():
     previous_sigterm = signal.signal(signal.SIGTERM, interrupt_on_termination)
 
     try:
-        for step, command, parser in TESTS:
-            if run_step(step, command, parser, output_dir, results):
+        for test in TESTS:
+            if test[0] == "14b":
+                continue  # Collected with 14a.
+            group = [test, next(t for t in TESTS if t[0] == "14b")] if test[0] == "14a" else [test]
+            if run_steps(group, output_dir, results):
                 interrupted = True
                 break
     except KeyboardInterrupt:
         interrupted = True
     except Exception as exc:
+        logger.exception("Benchmark runner failed")
         results["status"] = "runner_error"
         results["errors"].append(f"{type(exc).__name__}: {exc}")
     finally:
