@@ -81,19 +81,20 @@ python3 ./run-playbook ./benchmark-results/manual-run-001
 ```
 
 Every invocation runs the full sequence; there is no resume or step selection.
-Fixed-duration stress tests take about 20 minutes, plus the other tests. Tool
+The defaults are short runs for parser capture. Fixed-duration stress stages
+take about four minutes combined, plus the other tests. Tool
 output appears after each command finishes. Individual test failures generally
 allow later steps to run; cancellation and runner errors stop the sequence.
 
 | Steps | Checks |
 | --- | --- |
 | 2a–4b | SMART health, short self-tests, and self-test logs for both NVMe devices. |
-| 5 | FIO: random/sequential reads and writes, direct I/O, 4 KiB/2 MiB blocks, both filesystems; 16 configurations. |
-| 6–7 | `memtester`: 2 GiB, five loops; PTS stressapptest: 2000 MB, 32 threads, 300 seconds, `-W`. |
-| 8–10 | CPU stress at 75% for five minutes, a five-second sysbench CPU test, and STREAM Copy/Scale/Add/Triad. |
-| 11–12 | CUDA memory stress: five iterations, two passes; GPU burn: five minutes. |
-| 13a–13e | Five host/device and device-local bandwidth tests. |
-| 14a–14b | PTS CPU stress at 100% and GPU burn together for five minutes. |
+| 5 | FIO: all 16 configurations, two PTS runs each to capture multi-sample statistics; each run has a 60-second workload, 20-second start delay, and five-second ramp. |
+| 6–7 | `memtester`: 2 GiB, one loop; PTS stressapptest: 2000 MB, 32 threads, 60 seconds, `-W`. |
+| 8–10 | CPU stress at 75% for 60 seconds, one five-second sysbench CPU run, and one PTS run for each STREAM operation. |
+| 11–12 | CUDA memory stress: one iteration, one pass of test 10; GPU burn: 60 seconds. |
+| 13a–13e | Five host/device and device-local bandwidth tests, three samples each. |
+| 14a–14b | PTS CPU stress at 100% and GPU burn together for 60 seconds. |
 
 Steps before 14 run sequentially. Steps 14a and 14b run in separate concurrent
 containers with separate statuses and logs. A temporary shared start barrier
@@ -103,11 +104,21 @@ The barrier times out after 120 seconds if its peer never arrives. Cancellation
 attempts to stop both containers. The host output directory must support Docker
 bind mounts for this barrier.
 
-Stressapptest, stress-ng, and sysbench now run through PTS. Explicit presets
-preserve the original workloads, including 75%/100% CPU load, five-minute stress
-durations, and a five-second sysbench CPU run on all detected logical CPUs.
-These tests use `FORCE_TIMES_TO_RUN=1`; FIO and STREAM retain PTS repetition
-behavior. FIO can take over an hour across 16 configurations and repeated runs.
+FIO uses `FORCE_TIMES_TO_RUN=2` to capture multi-sample statistics. All other PTS
+commands use `FORCE_TIMES_TO_RUN=1`. These explicit counts avoid dynamic extra
+runs. Stress stages use `STRESS_SECONDS`
+(60 by default); sysbench uses all detected logical CPUs for five seconds.
+NVMe self-tests explicitly select the short test (`-s 1`), not the extended test.
+SMART and self-test log commands only read status.
+
+FIO takes roughly 45 minutes across 16 configurations with two runs each,
+before PTS overhead.
+Its 60-second runtime and startup timings come from the unmodified 2.0.0 profile.
+STREAM retains the profile binary's internal 100 iterations per operation even
+with one PTS run. Memtester, CUDA memory testing, STREAM, and the controller's
+short NVMe self-tests have hardware-dependent runtimes; they do not have a
+60-second wall-clock limit. These settings are for output capture and basic
+sanity checks, rather than prolonged hardware stability validation.
 
 ## Capture after this update
 
