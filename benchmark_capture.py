@@ -18,7 +18,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, BinaryIO
 
-COLLECTOR_VERSION = 3
+COLLECTOR_VERSION = 4
 SCHEMA_VERSION = 3
 
 

@@ -12,7 +12,7 @@ from typing import Any
 
 logger = logging.getLogger(__name__)
 
-PARSER_VERSION = 2
+PARSER_VERSION = 3
 
 ParsedResult = dict[str, Any]
 ParserFunction = Callable[[str, str, dict[str, Any]], ParsedResult]
@@ -827,7 +827,18 @@ def parser_descriptor(spec: ParserSpec) -> dict[str, Any]:
 
 def parse_output(spec: ParserSpec, stdout: str, stderr: str) -> ParsedResult:
     try:
-        return spec.function(stdout, stderr, spec.options)
+        result = spec.function(stdout, stderr, spec.options)
+        if spec.name in {'pts_fio', 'pts_stream', 'stressapptest', 'stress_ng', 'sysbench'}:
+            # PTS can exit zero without launching a test, including PHP crashes.
+            # Keep the real process exit code; distinguish these from format gaps.
+            diagnostics = re.findall(
+                r'(?m)^.*(?:PHP Fatal error:|\[NOTICE\]\s+pts/\S+ is not installed\.|PTS profile error:).*$',
+                combined_text(stdout, stderr),
+            )
+            if diagnostics:
+                result['outcome'] = 'fail'
+                result['warnings'].extend(line.strip() for line in diagnostics)
+        return result
     except Exception as exc:
         logger.exception("Parser %s failed", spec.name)
         return parsed_result(

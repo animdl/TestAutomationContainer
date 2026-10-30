@@ -84,7 +84,7 @@ STREAM_OPTIONS = f"stream.run-type={','.join(STREAM_OPERATIONS)}"
 def pts_command(profile, options, runs=1):
     return (
         f"env PTS_DISPLAY_MODE=BASIC FORCE_TIMES_TO_RUN={runs} PRESET_OPTIONS_VALUES='{options}' "
-        f"phoronix-test-suite batch-run {profile}"
+        f"pts-profile run {profile}"
     )
 
 
@@ -98,8 +98,9 @@ def cpu_stress_command(load, combined=False):
         command = "env TEST_EXEC_PREPEND='/usr/local/bin/combined-start cpu' " + command
     return command
 
-# Each entry owns its step ID, command, and parser configuration.
-TESTS = [
+# Execution order lives here. A list entry groups concurrent workloads;
+# every tuple entry runs alone. Profile versions live only in Dockerfile.
+PLAYBOOK = [
     (
         "2a", f"nvme smart-log {NVME0_DEVICE} -o json",
         ParserSpec("nvme_smart", parse_nvme_smart, {"device": NVME0_DEVICE}),
@@ -167,9 +168,19 @@ TESTS = [
         ParserSpec("nvbandwidth", parse_nvbandwidth),
     ),
     ("13e", f"nvbandwidth -t device_local_copy -b 1024 -i {NVBANDWIDTH_SAMPLES} -j", ParserSpec("nvbandwidth", parse_nvbandwidth)),
-    ("14a", cpu_stress_command(100, combined=True), ParserSpec("stress_ng", parse_stress_ng)),
-    ("14b", f"/usr/local/bin/combined-start gpu gpu-burn -tc {STRESS_SECONDS}", ParserSpec("gpu_burn", parse_gpu_burn)),
+    [
+        ("14a", cpu_stress_command(100, combined=True), ParserSpec("stress_ng", parse_stress_ng)),
+        ("14b", f"/usr/local/bin/combined-start gpu gpu-burn -tc {STRESS_SECONDS}", ParserSpec("gpu_burn", parse_gpu_burn)),
+    ],
 ]
+
+
+def execution_groups(playbook):
+    return [entry if isinstance(entry, list) else [entry] for entry in playbook]
+
+
+TESTS = [test for group in execution_groups(PLAYBOOK) for test in group]
+
 
 def docker_command(command, container_name=None, sync_dir=None):
     docker_args = [
@@ -381,10 +392,7 @@ def main():
     previous_sigterm = signal.signal(signal.SIGTERM, interrupt_on_termination)
 
     try:
-        for test in TESTS:
-            if test[0] == "14b":
-                continue  # Collected with 14a.
-            group = [test, next(t for t in TESTS if t[0] == "14b")] if test[0] == "14a" else [test]
+        for group in execution_groups(PLAYBOOK):
             if run_steps(group, output_dir, results):
                 interrupted = True
                 break

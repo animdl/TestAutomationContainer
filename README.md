@@ -22,16 +22,28 @@ export BENCH_IMAGE=bench:latest
 docker build -t "$BENCH_IMAGE" .
 
 docker run --rm --gpus all "$BENCH_IMAGE" nvidia-smi
+docker run --rm "$BENCH_IMAGE" pts-profile verify
 docker run --rm "$BENCH_IMAGE" phoronix-test-suite list-installed-tests
 ```
 
 Defaults: Ubuntu 24.04, CUDA 12.6.3, CUDA architecture `89`. Set `CUDA_VERSION`
 and `CUDA_ARCH` through Docker's `--build-arg` if needed for your GPU.
 
-The Dockerfile's `PTS_TESTS` argument is the source of PTS profile version pins.
-The runner uses unversioned profile names to select the installed versions.
-Keep one installed version per profile in the image. When updating pins, check
-whether the new profile requires changes to the runner's workload options.
+The Dockerfile's `PTS_TESTS` argument is the single source of PTS profile version
+pins. The build writes these pins into `/usr/local/share/benchmark/pts-profiles`.
+The runner refers to base profile names; `pts-profile` resolves them through that
+manifest and invokes PTS with the exact version, avoiding latest-version lookup.
+The build verifies every pinned installation and launcher and fails with install
+log excerpts if any are missing or failed, even when PTS returns exit code zero.
+The image explicitly installs profile extraction and build dependencies, including
+`bzip2` for STREAM and PHP ZIP support for PTS.
+APT package lists remain available during PTS installation for dependency
+resolution. The PTS path override includes its required trailing slash.
+Stressapptest is built with `-include cstdint` to supply the integer types its
+older source assumes are included indirectly; the flag applies only to that
+profile's installation.
+When updating pins, check whether the new profile requires changes to the
+runner's workload options.
 PTS itself and the other Git sources remain unpinned. Retain the built image
 for comparisons.
 
@@ -72,6 +84,8 @@ python3 ./run-playbook
 
 Run on the host, keeping `run-playbook`, `benchmark_capture.py`, and
 `benchmark_parsers.py` together. `BENCH_IMAGE` defaults to `bench:latest`.
+The rebuilt image must include the Dockerfile-generated profile manifest and
+`pts-profile` helper.
 
 Results default to `benchmark-results/YYYYMMDD-HHMMSS/`. To use another new or
 empty directory instead:
@@ -96,6 +110,9 @@ allow later steps to run; cancellation and runner errors stop the sequence.
 | 13a–13e | Five host/device and device-local bandwidth tests, three samples each. |
 | 14a–14b | PTS CPU stress at 100% and GPU burn together for 60 seconds. |
 
+`PLAYBOOK` in `run-playbook` defines execution order and concurrency. Tuple
+entries run sequentially; a list entry runs its member tuples concurrently.
+The suite metadata and collected result order are derived from this declaration.
 Steps before 14 run sequentially. Steps 14a and 14b run in separate concurrent
 containers with separate statuses and logs. A temporary shared start barrier
 holds GPU burn until PTS reaches the actual stress-ng launch. Both workloads
@@ -128,7 +145,12 @@ combined CPU/GPU contention have changed. Monitor temperatures, power, and
 throttling during combined load, and keep cooling and power settings consistent
 for later comparisons. Confirm the benchmark files land on the intended mounts.
 
-Parser changes are intentionally deferred until target output is available.
+The parser recognizes missing-profile notices and PHP fatal errors as failed
+outcomes even if PTS returns zero. `execution_status` and `exit_code` retain the
+actual process result; these failures are recorded in per-test warnings.
+`pts-profile` also checks that every profile option has an explicit workload
+preset before launching PTS, so profile changes cannot silently add workloads or
+fall through to broken noninteractive prompts.
 Keep the entire output directory, including `results.json` and every compressed
 raw log, even if parsing reports issues or the runner exits with code 1. PTS
 uses `PTS_DISPLAY_MODE=BASIC` to retain underlying tool output for that work.

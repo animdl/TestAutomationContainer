@@ -2,4 +2,3 @@ benchmark-results/
 tests/
 requirements-dev.txt
 __pycache__/
-test_runner.py

@@ -1,0 +1,96 @@
+#!/usr/bin/env python3
+"""Resolve PTS profiles from the image's Dockerfile-generated version manifest."""
+
+import json
+import os
+from pathlib import Path
+import re
+import subprocess
+import sys
+import xml.etree.ElementTree as ET
+
+MANIFEST = Path('/usr/local/share/benchmark/pts-profiles')
+PTS_ROOT = Path(os.environ.get('PTS_USER_PATH_OVERRIDE', '/var/lib/phoronix-test-suite'))
+
+
+def profile_map(manifest=MANIFEST):
+    profiles = {}
+    for identifier in manifest.read_text().split():
+        match = re.fullmatch(r'(pts/[a-z0-9-]+)-(\d+(?:\.\d+)+)', identifier)
+        if not match:
+            raise ValueError(f'invalid versioned PTS profile: {identifier}')
+        base = match.group(1)
+        if base in profiles:
+            raise ValueError(f'multiple version pins for {base}')
+        profiles[base] = identifier
+    if not profiles:
+        raise ValueError('PTS profile manifest is empty')
+    return profiles
+
+
+def verify_profile(identifier, root=PTS_ROOT):
+    directory = root / 'installed-tests' / identifier
+    try:
+        metadata = json.loads((directory / 'pts-install.json').read_text())
+        if metadata['test_installation']['status'] != 'INSTALLED':
+            raise ValueError('PTS installation status is not INSTALLED')
+        definition = ET.parse(root / 'test-profiles' / identifier / 'test-definition.xml')
+        executable = definition.findtext('TestInformation/Executable') or identifier.rsplit('/', 1)[-1].rsplit('-', 1)[0]
+        launcher = directory / executable
+        if not launcher.is_file() or not os.access(launcher, os.X_OK):
+            raise ValueError(f'PTS launcher is missing or not executable: {launcher}')
+    except (OSError, ValueError, KeyError, ET.ParseError) as exc:
+        # batch-install can return zero after a failed compile/download.
+        for name in ('install-failed.log', 'install.log'):
+            log = directory / name
+            if log.is_file():
+                print(f'--- {log} (last 80 lines) ---', file=sys.stderr)
+                print('\n'.join(log.read_text(errors='replace').splitlines()[-80:]), file=sys.stderr)
+                break
+        raise ValueError(f'{identifier}: installation verification failed: {exc}') from exc
+    return definition
+
+
+def main(argv=None):
+    args = sys.argv[1:] if argv is None else argv
+    try:
+        profiles = profile_map()
+        if args == ['verify']:
+            errors = []
+            for identifier in profiles.values():
+                try:
+                    verify_profile(identifier)
+                    print(f'Verified {identifier}', flush=True)
+                except ValueError as exc:
+                    errors.append(str(exc))
+            if errors:
+                raise ValueError('\n'.join(errors))
+            return 0
+        if len(args) != 2 or args[0] != 'run':
+            raise ValueError('usage: pts-profile verify | pts-profile run pts/NAME')
+        base = args[1]
+        if base not in profiles:
+            raise ValueError(f'{base} has no version pin in the image manifest')
+        identifier = profiles[base]
+        definition = verify_profile(identifier)
+        # An unspecified menu option can crash PTS in noninteractive mode.
+        # Require explicit options so a profile update cannot silently add work.
+        presets = {}
+        for setting in os.environ.get('PRESET_OPTIONS_VALUES', '').split(';'):
+            if '=' in setting:
+                key, value = setting.split('=', 1)
+                presets[key] = value
+        short = base.split('/', 1)[1]
+        for option in definition.findall('TestSettings/Option'):
+            key = f"{short}.{option.findtext('Identifier')}"
+            if not presets.get(key):
+                raise ValueError(f'{identifier}: missing explicit workload option {key}')
+        print(f'Running pinned PTS profile: {identifier}', flush=True)
+        return subprocess.call(['phoronix-test-suite', 'batch-run', identifier])
+    except (OSError, ValueError) as exc:
+        print(f'PTS profile error: {exc}', file=sys.stderr)
+        return 2
+
+
+if __name__ == '__main__':
+    raise SystemExit(main())

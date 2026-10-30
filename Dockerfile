@@ -3,21 +3,22 @@ FROM nvidia/cuda:${CUDA_VERSION}-devel-ubuntu24.04
 
 ARG DEBIAN_FRONTEND=noninteractive
 ARG CUDA_ARCH=89
-ARG PTS_TESTS="pts/fio-2.0.0 pts/stream-1.3.4 pts/stressapptest-1.0.1 pts/stress-ng-1.13.0 pts/sysbench-1.1.0"
+ARG PTS_TESTS="pts/fio-2.0.0 pts/stream-1.3.5 pts/stressapptest-1.0.1 pts/stress-ng-1.13.0 pts/sysbench-1.1.0"
 
 RUN apt-get update && \
     apt-get install -y --no-install-recommends \
-        php-cli php-xml php-gd php-bz2 php-sqlite3 php-curl \
-        git curl wget unzip ca-certificates \
+        php-cli php-xml php-gd php-bz2 php-sqlite3 php-curl php-zip \
+        git curl wget unzip bzip2 xz-utils ca-certificates \
         pciutils util-linux sudo \
         build-essential gfortran cmake \
-        autoconf automake libtool \
+        autoconf automake libtool libtool-bin \
         libaio-dev libssl-dev zlib1g-dev \
         libmysqlclient-dev \
         libboost-program-options-dev \
+        libjpeg-dev mesa-utils vulkan-tools apt-file \
         pkg-config \
         nvme-cli \
-        memtester \
+        memtester python3 \
     && rm -rf /var/lib/apt/lists/*
 
 WORKDIR /opt
@@ -26,10 +27,19 @@ RUN set -eux; \
     printf '#!/bin/sh\nexec /opt/phoronix-test-suite/phoronix-test-suite "$@"\n' > /usr/local/bin/phoronix-test-suite; \
     chmod +x /usr/local/bin/phoronix-test-suite
 
-ENV PTS_USER_PATH_OVERRIDE=/var/lib/phoronix-test-suite
+# PTS concatenates this value directly with installed-tests/ and test-profiles/.
+ENV PTS_USER_PATH_OVERRIDE=/var/lib/phoronix-test-suite/
 
+COPY pts-profile /usr/local/bin/pts-profile
+RUN chmod +x /usr/local/bin/pts-profile
+
+# PTS may install additional packages; keep APT lists until installation ends.
+# Force the missing integer header only for the older stressapptest source.
 RUN set -eux; \
+    apt-get update; \
     mkdir -p /var/lib/phoronix-test-suite; \
+    mkdir -p /usr/local/share/benchmark; \
+    printf '%s\n' ${PTS_TESTS} > /usr/local/share/benchmark/pts-profiles; \
     phoronix-test-suite enterprise-setup; \
     phoronix-test-suite user-config-set \
         SaveResults=FALSE \
@@ -40,7 +50,15 @@ RUN set -eux; \
         PromptSaveName=FALSE \
         RunAllTestCombinations=FALSE \
         Configured=TRUE; \
-    phoronix-test-suite batch-install ${PTS_TESTS}
+    for profile in ${PTS_TESTS}; do \
+        case "$profile" in \
+            pts/stressapptest-*) \
+                CXXFLAGS='-include cstdint' phoronix-test-suite batch-install "$profile" ;; \
+            *) phoronix-test-suite batch-install "$profile" ;; \
+        esac; \
+    done; \
+    pts-profile verify; \
+    rm -rf /var/lib/apt/lists/*
 
 COPY combined-start /usr/local/bin/combined-start
 RUN chmod +x /usr/local/bin/combined-start
