@@ -8,7 +8,7 @@ compressed logs are saved on the host.
 Run the commands below in Bash on the Linux workstation, from the repository root.
 
 - Docker with NVIDIA GPU support and a working host NVIDIA driver.
-- Host Python 3.10+, Bash, and `findmnt`. The runner needs no Python packages.
+- Host Python 3.9+, Bash, and `findmnt`. The runner needs no Python packages.
 - Two mounted NVMe filesystems with dedicated benchmark directories.
 - Internet access to build the image.
 

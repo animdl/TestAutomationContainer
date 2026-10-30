@@ -14,7 +14,7 @@ import time
 from collections.abc import Iterable, Sequence
 from contextlib import ExitStack
 from dataclasses import dataclass
-from datetime import UTC, datetime
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, BinaryIO
 
@@ -34,7 +34,7 @@ class ExecutionResult:
 
 
 def utc_now() -> datetime:
-    return datetime.now(UTC)
+    return datetime.now(timezone.utc)
 
 
 def timestamp(value: datetime | None = None) -> str:

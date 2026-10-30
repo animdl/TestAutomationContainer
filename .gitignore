@@ -1,3 +1,4 @@
+benchmark-results/
 tests/
 requirements-dev.txt
 __pycache__/
