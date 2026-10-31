@@ -1,6 +1,6 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
-  "$id": "https://example.invalid/workstation-benchmark-results-v3.schema.json",
+  "$id": "https://example.invalid/workstation-benchmark-results-v4.schema.json",
   "title": "Workstation benchmark results",
   "type": "object",
   "additionalProperties": false,
@@ -19,7 +19,7 @@
     "errors"
   ],
   "properties": {
-    "schema_version": {"const": 3},
+    "schema_version": {"const": 4},
     "collector": {
       "type": "object",
       "additionalProperties": false,
@@ -132,14 +132,14 @@
       "additionalProperties": false,
       "required": ["unit", "samples", "average", "deviation_percent", "sample_count"],
       "properties": {
-        "unit": {"enum": ["MB/s", "IOPS"]},
+        "unit": {"enum": ["B/s", "KiB/s", "MiB/s", "GiB/s", "TiB/s", "KB/s", "MB/s", "GB/s", "TB/s", "IOPS"]},
         "samples": {
           "type": "array",
           "items": {"type": "number"},
           "minItems": 1
         },
         "average": {"type": "number"},
-        "deviation_percent": {"type": "number", "minimum": 0},
+        "deviation_percent": {"type": ["number", "null"], "minimum": 0},
         "sample_count": {"type": "integer", "minimum": 1}
       }
     },
@@ -338,7 +338,8 @@
       "additionalProperties": false,
       "required": [
         "workload", "engine", "buffered", "direct", "block_size", "disk_target",
-        "throughput", "iops"
+        "throughput", "iops",
+        "job_count", "reported_throughput", "throughput_source", "runs"
       ],
       "properties": {
         "workload": {"enum": ["read", "write", "randread", "randwrite"]},
@@ -348,7 +349,11 @@
         "block_size": {"type": "string"},
         "disk_target": {"type": "string"},
         "throughput": {"$ref": "#/$defs/nullable_measurement"},
-        "iops": {"$ref": "#/$defs/nullable_measurement"}
+        "iops": {"$ref": "#/$defs/nullable_measurement"},
+        "job_count": {"$ref": "#/$defs/nullable_integer"},
+        "reported_throughput": {"$ref": "#/$defs/nullable_measurement"},
+        "throughput_source": {"enum": ["native", "pts"]},
+        "runs": {"type": "array", "items": {"$ref": "#/$defs/fio_run"}}
       }
     },
     "pts_fio_metrics": {
@@ -398,18 +403,23 @@
       "required": [
         "kind", "reported_status", "configured_memory_mb", "processed_mb",
         "reported_duration_seconds", "throughput_mb_per_second",
-        "memory_copy_mb_per_second", "hardware_incidents", "errors"
+        "memory_copy_mb_per_second", "hardware_incidents", "errors", "configured_threads", "configured_duration_seconds",
+        "phoronix_test_suite_version", "profile"
       ],
       "properties": {
         "kind": {"const": "stressapptest"},
         "reported_status": {"enum": ["PASS", "FAIL", null]},
         "configured_memory_mb": {"$ref": "#/$defs/nullable_integer"},
+        "configured_threads": {"$ref": "#/$defs/nullable_integer"},
+        "configured_duration_seconds": {"$ref": "#/$defs/nullable_integer"},
         "processed_mb": {"$ref": "#/$defs/nullable_number"},
         "reported_duration_seconds": {"$ref": "#/$defs/nullable_number"},
         "throughput_mb_per_second": {"$ref": "#/$defs/nullable_number"},
         "memory_copy_mb_per_second": {"$ref": "#/$defs/nullable_number"},
         "hardware_incidents": {"$ref": "#/$defs/nullable_integer"},
-        "errors": {"$ref": "#/$defs/nullable_integer"}
+        "errors": {"$ref": "#/$defs/nullable_integer"},
+        "phoronix_test_suite_version": {"$ref": "#/$defs/nullable_string"},
+        "profile": {"$ref": "#/$defs/nullable_string"}
       }
     },
     "stress_ng_metrics": {
@@ -417,15 +427,23 @@
       "additionalProperties": false,
       "required": [
         "kind", "passed_workers", "failed_workers", "skipped_workers",
-        "metrics_untrustworthy", "completion_marker_found"
+        "metrics_untrustworthy", "completion_marker_found",
+        "phoronix_test_suite_version", "profile", "configured_cpu_load_percent", "configured_duration_seconds", "dispatched_cpu_workers", "stressor_metrics", "version"
       ],
       "properties": {
         "kind": {"const": "stress_ng"},
+        "version": {"$ref": "#/$defs/nullable_string"},
         "passed_workers": {"$ref": "#/$defs/nullable_integer"},
         "failed_workers": {"$ref": "#/$defs/nullable_integer"},
         "skipped_workers": {"$ref": "#/$defs/nullable_integer"},
         "metrics_untrustworthy": {"$ref": "#/$defs/nullable_integer"},
-        "completion_marker_found": {"type": "boolean"}
+        "completion_marker_found": {"type": "boolean"},
+        "phoronix_test_suite_version": {"$ref": "#/$defs/nullable_string"},
+        "profile": {"$ref": "#/$defs/nullable_string"},
+        "configured_cpu_load_percent": {"$ref": "#/$defs/nullable_integer"},
+        "configured_duration_seconds": {"$ref": "#/$defs/nullable_integer"},
+        "dispatched_cpu_workers": {"$ref": "#/$defs/nullable_integer"},
+        "stressor_metrics": {"type": "array", "items": {"$ref": "#/$defs/stressor_metrics"}}
       }
     },
     "sysbench_metrics": {
@@ -436,7 +454,8 @@
         "total_time_seconds", "latency_ms_min", "latency_ms_average", "latency_ms_max",
         "latency_ms_p95", "latency_ms_sum", "events_fairness_average",
         "events_fairness_stddev", "execution_time_fairness_average",
-        "execution_time_fairness_stddev"
+        "execution_time_fairness_stddev",
+        "phoronix_test_suite_version", "profile"
       ],
       "properties": {
         "kind": {"const": "sysbench"},
@@ -453,7 +472,9 @@
         "events_fairness_average": {"$ref": "#/$defs/nullable_number"},
         "events_fairness_stddev": {"$ref": "#/$defs/nullable_number"},
         "execution_time_fairness_average": {"$ref": "#/$defs/nullable_number"},
-        "execution_time_fairness_stddev": {"$ref": "#/$defs/nullable_number"}
+        "execution_time_fairness_stddev": {"$ref": "#/$defs/nullable_number"},
+        "phoronix_test_suite_version": {"$ref": "#/$defs/nullable_string"},
+        "profile": {"$ref": "#/$defs/nullable_string"}
       }
     },
     "stream_operation": {
@@ -461,7 +482,7 @@
       "additionalProperties": false,
       "required": ["operation", "measurement"],
       "properties": {
-        "operation": {"enum": ["Copy", "Scale", "Add", "Triad"]},
+        "operation": {"type": "string", "minLength": 1},
         "measurement": {"$ref": "#/$defs/measurement"}
       }
     },
@@ -595,6 +616,45 @@
           "type": "array",
           "items": {"$ref": "#/$defs/nvbandwidth_testcase"}
         }
+      }
+    },
+    "fio_statistics": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["unit", "minimum", "maximum", "average", "stddev", "sample_count"],
+      "properties": {
+        "unit": {"type": "string"},
+        "minimum": {"type": "number"},
+        "maximum": {"type": "number"},
+        "average": {"type": "number"},
+        "stddev": {"type": "number"},
+        "sample_count": {"type": "integer", "minimum": 0}
+      }
+    },
+    "fio_run": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["run", "errors", "duration_seconds", "throughput", "iops"],
+      "properties": {
+        "run": {"type": "integer", "minimum": 1},
+        "errors": {"$ref": "#/$defs/nullable_integer"},
+        "duration_seconds": {"$ref": "#/$defs/nullable_number"},
+        "throughput": {"oneOf": [{"type": "null"}, {"$ref": "#/$defs/fio_statistics"}]},
+        "iops": {"oneOf": [{"type": "null"}, {"$ref": "#/$defs/fio_statistics"}]}
+      }
+    },
+    "stressor_metrics": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["stressor", "bogo_ops", "real_time_seconds", "user_time_seconds", "system_time_seconds", "bogo_ops_per_second_real", "bogo_ops_per_second_cpu"],
+      "properties": {
+        "stressor": {"type": "string"},
+        "bogo_ops": {"type": "integer"},
+        "real_time_seconds": {"type": "number"},
+        "user_time_seconds": {"type": "number"},
+        "system_time_seconds": {"type": "number"},
+        "bogo_ops_per_second_real": {"type": "number"},
+        "bogo_ops_per_second_cpu": {"type": "number"}
       }
     }
   }

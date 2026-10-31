@@ -3,7 +3,7 @@ FROM nvidia/cuda:${CUDA_VERSION}-devel-ubuntu24.04
 
 ARG DEBIAN_FRONTEND=noninteractive
 ARG CUDA_ARCH=89
-ARG PTS_TESTS="pts/fio-2.0.0 pts/stream-1.3.5 pts/stressapptest-1.0.1 pts/stress-ng-1.13.0 pts/sysbench-1.1.0"
+ARG PTS_TESTS="pts/fio-1.15.0 pts/stream-1.3.4 pts/stressapptest-1.0.1 pts/sysbench-1.1.0"
 
 RUN apt-get update && \
     apt-get install -y --no-install-recommends \
@@ -18,7 +18,7 @@ RUN apt-get update && \
         libjpeg-dev mesa-utils vulkan-tools apt-file \
         pkg-config \
         nvme-cli \
-        memtester python3 \
+        memtester stress-ng python3 \
     && rm -rf /var/lib/apt/lists/*
 
 WORKDIR /opt

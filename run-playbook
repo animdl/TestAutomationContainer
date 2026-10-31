@@ -65,6 +65,8 @@ FIO_BLOCK_SIZES = ("4k", "2m")
 MEMTESTER_LOOPS = 1
 CUDA_MEMTEST_PASSES = 1
 STRESS_SECONDS = 60
+CPU_LOAD_PERCENT = 75
+COMBINED_CPU_LOAD_PERCENT = 100
 NVBANDWIDTH_SAMPLES = 3
 STREAM_OPERATIONS = ("Copy", "Scale", "Add", "Triad")
 
@@ -73,7 +75,6 @@ FIO_OPTIONS = (
     "fio.engine=libaio;"
     "fio.buffered=0;"
     "fio.direct=1;"
-    "fio.cpu-threads=1;"
     f"fio.size={','.join(FIO_BLOCK_SIZES)};"
     f"fio.auto-disk-mount-points={','.join(target for _, target in BENCH_MOUNTS)}"
 )
@@ -89,14 +90,13 @@ def pts_command(profile, options, runs=1):
 
 
 def cpu_stress_command(load, combined=False):
-    # Default profile arguments precede these options, so --timeout overrides -t 30.
-    command = pts_command(
-        "pts/stress-ng",
-        f"stress-ng.test=--cpu 0 --cpu-load {load} --timeout {STRESS_SECONDS}",
+    command = (
+        f"stress-ng --cpu 0 --cpu-load {load} --timeout {STRESS_SECONDS} "
+        "--metrics-brief"
     )
     if combined:
-        command = "env TEST_EXEC_PREPEND='/usr/local/bin/combined-start cpu' " + command
-    return command
+        command = "/usr/local/bin/combined-start cpu " + command
+    return "stress-ng --version && " + command
 
 # Execution order lives here. A list entry groups concurrent workloads;
 # every tuple entry runs alone. Profile versions live only in Dockerfile.
@@ -130,6 +130,7 @@ PLAYBOOK = [
         pts_command("pts/fio", FIO_OPTIONS, runs=2),
         ParserSpec("pts_fio", parse_pts_fio, {
             "expected_configurations": len(FIO_WORKLOADS) * len(FIO_BLOCK_SIZES) * len(BENCH_MOUNTS),
+            "expected_samples": 2,
         }),
     ),
     (
@@ -139,12 +140,14 @@ PLAYBOOK = [
     (
         "7", pts_command("pts/stressapptest",
                          "stressapptest.cpu-threads=32;stressapptest.ram-capacity=2000;"
-                         f"stressapptest.duration={STRESS_SECONDS} -W"),
+                         f"stressapptest.duration={STRESS_SECONDS}"),
         ParserSpec("stressapptest", parse_stressapptest),
     ),
-    ("8", cpu_stress_command(75), ParserSpec("stress_ng", parse_stress_ng)),
+    ("8", cpu_stress_command(CPU_LOAD_PERCENT), ParserSpec("stress_ng", parse_stress_ng, {
+        "cpu_load_percent": CPU_LOAD_PERCENT, "duration_seconds": STRESS_SECONDS,
+    })),
     (
-        "9", pts_command("pts/sysbench", "sysbench.run-test=--time=5 cpu"),
+        "9", pts_command("pts/sysbench", "sysbench.run-test=cpu"),
         ParserSpec("sysbench", parse_sysbench),
     ),
     (
@@ -169,7 +172,10 @@ PLAYBOOK = [
     ),
     ("13e", f"nvbandwidth -t device_local_copy -b 1024 -i {NVBANDWIDTH_SAMPLES} -j", ParserSpec("nvbandwidth", parse_nvbandwidth)),
     [
-        ("14a", cpu_stress_command(100, combined=True), ParserSpec("stress_ng", parse_stress_ng)),
+        ("14a", cpu_stress_command(COMBINED_CPU_LOAD_PERCENT, combined=True),
+         ParserSpec("stress_ng", parse_stress_ng, {
+             "cpu_load_percent": COMBINED_CPU_LOAD_PERCENT, "duration_seconds": STRESS_SECONDS,
+         })),
         ("14b", f"/usr/local/bin/combined-start gpu gpu-burn -tc {STRESS_SECONDS}", ParserSpec("gpu_burn", parse_gpu_burn)),
     ],
 ]

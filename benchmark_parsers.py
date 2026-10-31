@@ -12,7 +12,7 @@ from typing import Any
 
 logger = logging.getLogger(__name__)
 
-PARSER_VERSION = 3
+PARSER_VERSION = 4
 
 ParsedResult = dict[str, Any]
 ParserFunction = Callable[[str, str, dict[str, Any]], ParsedResult]
@@ -248,11 +248,11 @@ def parse_nvme_self_test_log(
 
 PTS_NUMBER = r"[-+]?(?:\d+(?:\.\d*)?|\.\d+)(?:[eE][-+]?\d+)?"
 PTS_RESULT_PATTERN = re.compile(
-    rf"(?m)^    Type: (?P<label>[^\r\n]+):\r?\n"
-    rf"(?P<samples>(?:        {PTS_NUMBER}\r?\n)+)"
-    rf"\r?\n    Average: (?P<average>{PTS_NUMBER}) "
-    rf"(?P<unit>MB/s|IOPS)\r?\n"
-    rf"    Deviation: (?P<deviation>{PTS_NUMBER})%"
+    rf"(?m)^[ \t]*Type: (?P<label>[^\r\n]+)\r?\n(?:\r?\n)?"
+    rf"(?P<samples>(?:[ \t]*{PTS_NUMBER}(?: (?:[KMGT]?i?B/s|IOPS))?[ \t]*\r?\n)+)"
+    rf"\r?\n[ \t]*Average: (?P<average>{PTS_NUMBER}) "
+    rf"(?P<unit>[KMGT]?i?B/s|IOPS)\r?\n"
+    rf"(?:[ \t]*Deviation: (?P<deviation>{PTS_NUMBER})%)?"
 )
 
 
@@ -268,106 +268,159 @@ def _pts_versions(text: str, profile_pattern: str, tool_pattern: str) -> dict[st
 
 
 def _pts_measurement(match: re.Match[str]) -> dict[str, Any]:
-    samples = [float(value) for value in re.findall(PTS_NUMBER, match.group("samples"))]
+    samples = [float(value) for value in re.findall(
+        rf"(?m)^[ \t]*({PTS_NUMBER})", match.group("samples")
+    )]
     return {
         "unit": match.group("unit"),
         "samples": samples,
         "average": float(match.group("average")),
-        "deviation_percent": float(match.group("deviation")),
+        "deviation_percent": (
+            float(match.group("deviation")) if match.group("deviation") else None
+        ),
         "sample_count": len(samples),
     }
 
 
+def _fio_statistics(text: str, name: str) -> dict[str, Any] | None:
+    match = re.search(
+        rf"(?m)^\s*{name}\s*(?:\(\s*([^)]*)\))?\s*:\s*"
+        rf"min=\s*({PTS_NUMBER}), max=\s*({PTS_NUMBER}), "
+        rf"(?:per=[^,]+, )?avg=\s*({PTS_NUMBER}), stdev=\s*({PTS_NUMBER}), samples=(\d+)",
+        text,
+    )
+    if not match:
+        return None
+    return {
+        "unit": match.group(1).strip() if match.group(1) else "IOPS",
+        "minimum": float(match.group(2)), "maximum": float(match.group(3)),
+        "average": float(match.group(4)), "stddev": float(match.group(5)),
+        "sample_count": int(match.group(6)),
+    }
+
+
 def parse_pts_fio(
-    stdout: str,
-    stderr: str,
-    options: dict[str, Any],
+    stdout: str, stderr: str, options: dict[str, Any],
 ) -> ParsedResult:
     text = combined_text(stdout, stderr)
     versions = _pts_versions(
-        text,
-        r"(pts/fio-[0-9.]+)",
-        r"Flexible IO Tester\s+([^:\r\n]+):",
+        text, r"(pts/fio-[0-9.]+)", r"(?m)^fio-([0-9.]+)",
     )
-    grouped: dict[tuple[str, str, int | None, int | None, str, str], dict[str, Any]] = {}
+    if versions["tool_version"] is None:
+        legacy = re.search(r"Flexible IO Tester ([0-9.]+):", text)
+        versions["tool_version"] = legacy.group(1) if legacy else None
+    grouped: dict[tuple[Any, ...], dict[str, Any]] = {}
     warnings: list[str] = []
 
-    for match in PTS_RESULT_PATTERN.finditer(text):
-        parts = [part.strip() for part in match.group("label").split(" - ")]
-        workload = parts[0].lower()
-        values: dict[str, str] = {}
-        for part in parts[1:]:
-            if ": " in part:
-                key, value = part.split(": ", 1)
-                values[key] = value
+    def configuration(label: str) -> dict[str, Any] | None:
+        parts = label.rstrip(":").split(" - ")
+        values = dict(part.split(": ", 1) for part in parts[1:] if ": " in part)
         try:
-            buffered = int(values["Buffered"]) if "Buffered" in values else None
-            direct = int(values["Direct"]) if "Direct" in values else None
-            key = (
-                workload,
-                values["Engine"],
-                buffered,
-                direct,
-                values["Block Size"],
-                values["Disk Target"],
-            )
+            fields = {
+                "workload": parts[0].lower(), "engine": values["Engine"],
+                "buffered": int(values["Buffered"]) if "Buffered" in values else None,
+                "direct": int(values["Direct"]) if "Direct" in values else None,
+                "block_size": values["Block Size"], "disk_target": values["Disk Target"],
+                "job_count": int(values["Job Count"]) if "Job Count" in values else None,
+            }
         except (KeyError, ValueError) as exc:
             warnings.append(f"could not parse FIO configuration label: {exc}")
+            return None
+        return grouped.setdefault(tuple(fields.values()), {
+            **fields, "throughput": None, "iops": None,
+            "reported_throughput": None, "throughput_source": "pts", "runs": [],
+        })
+
+    for match in PTS_RESULT_PATTERN.finditer(text):
+        item = configuration(match.group("label"))
+        if item is None:
             continue
+        field = "iops" if match.group("unit") == "IOPS" else "reported_throughput"
+        if item[field] is not None:
+            warnings.append(f"duplicate {field} result for {match.group('label')}")
+        item[field] = _pts_measurement(match)
 
-        configuration = grouped.setdefault(
-            key,
-            {
-                "workload": workload,
-                "engine": values["Engine"],
-                "buffered": buffered,
-                "direct": direct,
-                "block_size": values["Block Size"],
-                "disk_target": values["Disk Target"],
-                "throughput": None,
-                "iops": None,
-            },
+    # BASIC mode includes native output. Its explicit units take precedence over
+    # PTS's known incorrect bandwidth labels, while the PTS summary is preserved.
+    for match in re.finditer(
+        r"(?ms)^Flexible IO Tester \(Run (\d+) of (\d+)\)\r?\n"
+        r"Type: ([^\r\n]+)\r?\n(.*?)(?=^Flexible IO Tester|\Z)", text,
+    ):
+        item = configuration(match.group(3))
+        if item is None:
+            continue
+        body = match.group(4)
+        item["runs"].append({
+            "run": int(match.group(1)),
+            "errors": _number(r"\berr=\s*(\d+)", body, int),
+            "duration_seconds": _number(r"/([0-9]+)msec\)", body, lambda n: int(n) / 1000),
+            "throughput": _fio_statistics(body, "bw"),
+            "iops": _fio_statistics(body, "iops"),
+        })
+
+    factors = {"B/s": 1 / 1048576, "KiB/s": 1 / 1024, "MiB/s": 1,
+               "GiB/s": 1024, "TiB/s": 1048576, "kB/s": 1000 / 1048576,
+               "KB/s": 1000 / 1048576, "MB/s": 1000000 / 1048576,
+               "GB/s": 1000000000 / 1048576, "TB/s": 1000000000000 / 1048576}
+    expected_samples = options.get("expected_samples")
+    complete = True
+    failed = False
+    for item in grouped.values():
+        item["throughput"] = item["reported_throughput"]
+        runs = item["runs"]
+        native_units_known = runs and all(
+            run["throughput"] and run["throughput"]["unit"] in factors for run in runs
         )
-        field = "throughput" if match.group("unit") == "MB/s" else "iops"
-        if configuration[field] is not None:
-            warnings.append(
-                f"duplicate {field} result for {workload} {values['Block Size']} "
-                f"on {values['Disk Target']}"
-            )
-        configuration[field] = _pts_measurement(match)
-
+        if native_units_known:
+            samples = [
+                run["throughput"]["average"] * factors[run["throughput"]["unit"]]
+                for run in runs
+            ]
+            average = statistics.fmean(samples)
+            item["throughput"] = {
+                "unit": "MiB/s", "samples": samples, "average": average,
+                "deviation_percent": None, "sample_count": len(samples),
+            }
+            item["throughput_source"] = "native"
+            reported = item["reported_throughput"]
+            if reported:
+                factor = factors.get(reported["unit"])
+                if factor is not None and abs(reported["average"] * factor - average) > max(0.02, average * 0.001):
+                    warnings.append(
+                        f"PTS throughput differs from native FIO units for {item['workload']} "
+                        f"{item['block_size']} on {item['disk_target']}; native values used"
+                    )
+        if runs and (not native_units_known or any(
+            run["iops"] is None or run["errors"] is None for run in runs
+        )):
+            complete = False
+            warnings.append("incomplete native FIO run statistics")
+        failed |= any(run["errors"] not in (None, 0) for run in runs)
+        for field in ("throughput", "iops"):
+            measurement = item[field]
+            if measurement is None:
+                complete = False
+                warnings.append(f"missing FIO {field} for {item['workload']} {item['block_size']} on {item['disk_target']}")
+            elif expected_samples is not None and measurement["sample_count"] != expected_samples:
+                complete = False
+                warnings.append(f"expected {expected_samples} FIO samples, found {measurement['sample_count']}")
+        if (runs and expected_samples is not None
+                and sorted(run["run"] for run in runs) != list(range(1, expected_samples + 1))):
+            complete = False
+            warnings.append("native FIO run numbers do not match expected repetitions")
     configurations = list(grouped.values())
     expected = int(options["expected_configurations"])
-    complete_pairs = all(
-        item["throughput"] is not None and item["iops"] is not None
-        for item in configurations
-    )
-    complete = (
-        len(configurations) == expected
-        and complete_pairs
-        and versions["profile"] is not None
-        and versions["tool_version"] is not None
-    )
     if len(configurations) != expected:
-        warnings.append(
-            f"expected {expected} FIO configurations, found {len(configurations)}"
-        )
-    if configurations and not complete_pairs:
-        warnings.append("one or more FIO configurations is missing throughput or IOPS")
-
+        complete = False
+        warnings.append(f"expected {expected} FIO configurations, found {len(configurations)}")
+    complete &= versions["profile"] is not None
     metrics = {
-        "kind": "pts_fio",
-        **versions,
+        "kind": "pts_fio", **versions,
         "expected_configuration_count": expected,
-        "configuration_count": len(configurations),
-        "configurations": configurations,
+        "configuration_count": len(configurations), "configurations": configurations,
     }
-    return parsed_result(
-        "complete" if complete else "partial",
-        "pass" if complete else "unknown",
-        metrics,
-        warnings,
-    )
+    return parsed_result("complete" if complete else "partial",
+                         "fail" if failed else "pass" if complete else "unknown", metrics, warnings)
 
 
 def parse_memtester(
@@ -446,6 +499,8 @@ def parse_stressapptest(
         "kind": "stressapptest",
         "reported_status": reported,
         "configured_memory_mb": int(configured.group(1)) if configured else None,
+        "configured_threads": _number(r"Threads: (\d+)", text, int),
+        "configured_duration_seconds": _number(r"Duration: (\d+)", text, int),
         "processed_mb": float(completed.group(1)) if completed else None,
         "reported_duration_seconds": float(completed.group(2)) if completed else None,
         "throughput_mb_per_second": float(completed.group(3)) if completed else None,
@@ -468,8 +523,10 @@ def parse_stress_ng(
     stderr: str,
     options: dict[str, Any],
 ) -> ParsedResult:
-    del options
     text = combined_text(stdout, stderr)
+    version = re.search(r"(?m)^stress-ng, version ([^\s]+)", text)
+    load = _number(r"--cpu-load (\d+)", text, int)
+    duration = _number(r"--timeout (\d+)(?:\s|$)", text, int)
     passed = re.search(r"passed:\s+(\d+):", text)
     failed = re.search(r"failed:\s+(\d+)", text)
     skipped = re.search(r"skipped:\s+(\d+)", text)
@@ -477,9 +534,12 @@ def parse_stress_ng(
     successful = "successful run completed" in text
     passed_count = int(passed.group(1)) if passed else None
     failed_count = int(failed.group(1)) if failed else None
+    untrustworthy_count = int(untrustworthy.group(1)) if untrustworthy else None
     complete = successful and passed_count is not None and failed_count is not None
     if failed_count is not None and failed_count > 0:
         outcome = "fail"
+    elif untrustworthy_count not in (None, 0):
+        outcome = "unknown"
     elif complete and passed_count is not None and passed_count > 0 and failed_count == 0:
         outcome = "pass"
     else:
@@ -491,19 +551,39 @@ def parse_stress_ng(
         )
     )
     warnings = []
+    if untrustworthy_count not in (None, 0):
+        warnings.append("stress-ng reported untrustworthy metrics")
     if stable_warnings:
         warnings.append(f"stable CPU method warning repeated {stable_warnings} times")
+    warnings.extend(re.findall(r"(?m)^.*(?:note:.*(?:governor|sched_autogroup)).*$", text))
     if not complete and outcome == "unknown":
         warnings.append("complete stress-ng summary not found")
     metrics = {
         "kind": "stress_ng",
+        "version": version.group(1) if version else None,
         "passed_workers": passed_count,
         "failed_workers": failed_count,
         "skipped_workers": int(skipped.group(1)) if skipped else None,
-        "metrics_untrustworthy": (
-            int(untrustworthy.group(1)) if untrustworthy else None
-        ),
+        "metrics_untrustworthy": untrustworthy_count,
         "completion_marker_found": successful,
+        "configured_cpu_load_percent": load if load is not None else options.get("cpu_load_percent"),
+        "configured_duration_seconds": duration if duration is not None else options.get("duration_seconds"),
+        "dispatched_cpu_workers": _number(r"dispatching hogs:\s+(\d+) cpu", text, int),
+        "stressor_metrics": [
+            {
+                "stressor": match.group(1), "bogo_ops": int(match.group(2)),
+                "real_time_seconds": float(match.group(3)),
+                "user_time_seconds": float(match.group(4)),
+                "system_time_seconds": float(match.group(5)),
+                "bogo_ops_per_second_real": float(match.group(6)),
+                "bogo_ops_per_second_cpu": float(match.group(7)),
+            }
+            for match in re.finditer(
+                rf"(?m)^stress-ng: metrc:\s+\[\d+\]\s+(\S+)\s+(\d+)"
+                rf"\s+({PTS_NUMBER})\s+({PTS_NUMBER})\s+({PTS_NUMBER})"
+                rf"\s+({PTS_NUMBER})\s+({PTS_NUMBER})\s*$", text
+            )
+        ],
     }
     return parsed_result(
         "complete" if complete or outcome == "fail" else "partial",
@@ -571,12 +651,12 @@ def parse_pts_stream(
     versions = _pts_versions(
         text,
         r"(pts/stream-[0-9.]+)",
-        r"Stream\s+([^:\r\n]+):",
+        r"Stream ([0-9][^:\r\n]*):",
     )
     by_operation: dict[str, dict[str, Any]] = {}
     warnings: list[str] = []
     for match in PTS_RESULT_PATTERN.finditer(text):
-        operation = match.group("label").strip()
+        operation = match.group("label").strip().rstrip(":")
         if operation in by_operation:
             warnings.append(f"duplicate STREAM result for {operation}")
         by_operation[operation] = {
@@ -602,7 +682,6 @@ def parse_pts_stream(
         and not unexpected
         and len(by_operation) == len(expected_operations)
         and versions["profile"] is not None
-        and versions["tool_version"] is not None
     )
     metrics = {
         "kind": "pts_stream",
@@ -667,11 +746,16 @@ def parse_cuda_memtest(
         "completion_marker_found": exited,
         "failure_marker_found": explicit_failure,
     }
+    warnings = re.findall(r"(?m)^.*\bWARNING:.*$", text)
+    if any(value == 0 for value in finished_seconds) and any(float(value[0]) > 0 for value in pass_reports):
+        warnings.append("cuda_memtest reports zero completion time alongside positive elapsed time; reported timings retained separately")
+    if not complete and outcome != "fail":
+        warnings.append("expected cuda_memtest completion not found")
     return parsed_result(
         "complete" if complete or outcome == "fail" else "partial",
         outcome,
         metrics,
-        [] if complete or outcome == "fail" else ["expected cuda_memtest completion not found"],
+        warnings,
     )
 
 
@@ -832,12 +916,20 @@ def parse_output(spec: ParserSpec, stdout: str, stderr: str) -> ParsedResult:
             # PTS can exit zero without launching a test, including PHP crashes.
             # Keep the real process exit code; distinguish these from format gaps.
             diagnostics = re.findall(
-                r'(?m)^.*(?:PHP Fatal error:|\[NOTICE\]\s+pts/\S+ is not installed\.|PTS profile error:).*$',
+                r'(?m)^.*(?:PHP Fatal error:|\[NOTICE\]\s+pts/\S+ is not installed\.|PTS profile error:|Syntax error:|syntax error:).*$',
                 combined_text(stdout, stderr),
             )
             if diagnostics:
                 result['outcome'] = 'fail'
                 result['warnings'].extend(line.strip() for line in diagnostics)
+            if spec.name in {'stressapptest', 'stress_ng', 'sysbench'} and result['metrics'] is not None:
+                text = combined_text(stdout, stderr)
+                pts = re.search(r"Phoronix Test Suite v([^\s]+)", text)
+                profile = re.search(r"Running pinned PTS profile: (pts/[^\s]+)", text)
+                result['metrics'].update({
+                    'phoronix_test_suite_version': pts.group(1) if pts else None,
+                    'profile': profile.group(1) if profile else None,
+                })
         return result
     except Exception as exc:
         logger.exception("Parser %s failed", spec.name)
