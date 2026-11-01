@@ -173,14 +173,15 @@ failures rather than assuming every reported issue is a parser mismatch.
 
 Each run produces `results.json` and `raw/*.stdout.log.gz` / `raw/*.stderr.log.gz`.
 The JSON contains metrics, warnings, timings, image/source identities, and log
-sizes and hashes. Its format is defined by `results.schema.json` (version 4).
+sizes and hashes. Its format is defined by `results.schema.json` (version 5).
 
 - `execution_status`: command execution state.
 - `collection_status`: parsing completeness.
 - `outcome`: `pass`, `fail`, or `unknown`; no performance regression thresholds.
 
-FIO retains PTS summaries and native per-run bandwidth/IOPS statistics. When
-native bandwidth is available, `throughput` uses normalized MiB/s and
+FIO retains PTS summaries and native per-run bandwidth/IOPS statistics and whole-run bandwidth summaries. When
+native bandwidth is available, `throughput` uses normalized MiB/s from whole-run summaries when available
+(falling back to sampled statistics), and
 `reported_throughput` preserves the PTS value and unit. Unit discrepancies
 produce warnings. Missing deviation and tool versions remain null. Shell
 syntax errors produce failed outcomes even when measurements are collected.
@@ -199,3 +200,18 @@ active container; cleanup failures are recorded in warnings and stderr.
 | `1` | Sequence finished with issues. |
 | `2` | Handled setup or runner error. |
 | `130` | Interrupted. |
+
+Schema/parser version 5 distinguishes FIO `throughput_source` values
+`native_summary`, `native_statistics`, and `pts`; each native run also retains
+`summary_throughput` separately from sampled `throughput` statistics. STREAM
+records `solution_validated` (null when unavailable) and the native revision.
+A reported STREAM validation failure produces a failed outcome. GPU burn
+`sample_count` and GFLOPS summaries count work updates once, while
+`progress_record_count` counts all display records. Temperature and error
+readings still include repeated progress records. GFLOPS means are arithmetic
+means across work updates, not time-weighted measurements.
+
+See [the target run review](benchmark-review-20261031.md) for findings from
+the 2026-10-31 capture. Replay and regression checks require `jsonschema`:
+`python -m unittest test_benchmark_parsers -v`. The replay check skips when
+the original capture directory is absent.

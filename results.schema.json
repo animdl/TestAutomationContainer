@@ -1,6 +1,6 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
-  "$id": "https://example.invalid/workstation-benchmark-results-v4.schema.json",
+  "$id": "https://example.invalid/workstation-benchmark-results-v5.schema.json",
   "title": "Workstation benchmark results",
   "type": "object",
   "additionalProperties": false,
@@ -19,7 +19,7 @@
     "errors"
   ],
   "properties": {
-    "schema_version": {"const": 4},
+    "schema_version": {"const": 5},
     "collector": {
       "type": "object",
       "additionalProperties": false,
@@ -352,7 +352,7 @@
         "iops": {"$ref": "#/$defs/nullable_measurement"},
         "job_count": {"$ref": "#/$defs/nullable_integer"},
         "reported_throughput": {"$ref": "#/$defs/nullable_measurement"},
-        "throughput_source": {"enum": ["native", "pts"]},
+        "throughput_source": {"enum": ["native_summary", "native_statistics", "pts"]},
         "runs": {"type": "array", "items": {"$ref": "#/$defs/fio_run"}}
       }
     },
@@ -491,10 +491,11 @@
       "additionalProperties": false,
       "required": [
         "kind", "phoronix_test_suite_version", "profile", "tool_version",
-        "expected_operation_count", "operation_count", "operations"
+        "expected_operation_count", "operation_count", "operations", "solution_validated"
       ],
       "properties": {
         "kind": {"const": "pts_stream"},
+        "solution_validated": {"type": ["boolean", "null"]},
         "phoronix_test_suite_version": {"$ref": "#/$defs/nullable_string"},
         "profile": {"$ref": "#/$defs/nullable_string"},
         "tool_version": {"$ref": "#/$defs/nullable_string"},
@@ -553,13 +554,14 @@
       "additionalProperties": false,
       "required": [
         "kind", "configured_duration_seconds", "tested_gpu_count", "gpu_devices",
-        "gpu_statuses", "sample_count", "maximum_reported_errors", "gflops_min",
+        "gpu_statuses", "sample_count", "progress_record_count", "maximum_reported_errors", "gflops_min",
         "gflops_median", "gflops_mean", "gflops_max", "gflops_final",
         "temperature_celsius_min", "temperature_celsius_max", "temperature_celsius_final",
         "processed_iterations_final"
       ],
       "properties": {
         "kind": {"const": "gpu_burn"},
+        "progress_record_count": {"type": "integer", "minimum": 0},
         "configured_duration_seconds": {"$ref": "#/$defs/nullable_integer"},
         "tested_gpu_count": {"$ref": "#/$defs/nullable_integer"},
         "gpu_devices": {"type": "array", "items": {"$ref": "#/$defs/gpu_device"}},
@@ -634,8 +636,18 @@
     "fio_run": {
       "type": "object",
       "additionalProperties": false,
-      "required": ["run", "errors", "duration_seconds", "throughput", "iops"],
+      "required": ["run", "errors", "duration_seconds", "throughput", "summary_throughput", "iops"],
       "properties": {
+        "summary_throughput": {
+          "oneOf": [
+            {"type": "null"},
+            {
+              "type": "object", "additionalProperties": false,
+              "required": ["unit", "value"],
+              "properties": {"unit": {"type": "string"}, "value": {"type": "number"}}
+            }
+          ]
+        },
         "run": {"type": "integer", "minimum": 1},
         "errors": {"$ref": "#/$defs/nullable_integer"},
         "duration_seconds": {"$ref": "#/$defs/nullable_number"},

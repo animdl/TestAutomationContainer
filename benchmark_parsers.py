@@ -12,7 +12,7 @@ from typing import Any
 
 logger = logging.getLogger(__name__)
 
-PARSER_VERSION = 4
+PARSER_VERSION = 5
 
 ParsedResult = dict[str, Any]
 ParserFunction = Callable[[str, str, dict[str, Any]], ParsedResult]
@@ -350,11 +350,18 @@ def parse_pts_fio(
         if item is None:
             continue
         body = match.group(4)
+        summary = re.search(
+            rf"(?m)^\s*(?:read|write):.*?\bBW=({PTS_NUMBER})([KMGT]?i?B/s)", body,
+        )
         item["runs"].append({
             "run": int(match.group(1)),
             "errors": _number(r"\berr=\s*(\d+)", body, int),
             "duration_seconds": _number(r"/([0-9]+)msec\)", body, lambda n: int(n) / 1000),
             "throughput": _fio_statistics(body, "bw"),
+            "summary_throughput": (
+                {"value": float(summary.group(1)), "unit": summary.group(2)}
+                if summary else None
+            ),
             "iops": _fio_statistics(body, "iops"),
         })
 
@@ -368,20 +375,24 @@ def parse_pts_fio(
     for item in grouped.values():
         item["throughput"] = item["reported_throughput"]
         runs = item["runs"]
-        native_units_known = runs and all(
+        summaries_known = runs and all(
+            run["summary_throughput"] and run["summary_throughput"]["unit"] in factors
+            for run in runs
+        )
+        statistics_known = runs and all(
             run["throughput"] and run["throughput"]["unit"] in factors for run in runs
         )
+        native_units_known = summaries_known or statistics_known
         if native_units_known:
-            samples = [
-                run["throughput"]["average"] * factors[run["throughput"]["unit"]]
-                for run in runs
-            ]
+            field = "summary_throughput" if summaries_known else "throughput"
+            value = "value" if summaries_known else "average"
+            samples = [run[field][value] * factors[run[field]["unit"]] for run in runs]
             average = statistics.fmean(samples)
             item["throughput"] = {
                 "unit": "MiB/s", "samples": samples, "average": average,
                 "deviation_percent": None, "sample_count": len(samples),
             }
-            item["throughput_source"] = "native"
+            item["throughput_source"] = "native_summary" if summaries_known else "native_statistics"
             reported = item["reported_throughput"]
             if reported:
                 factor = factors.get(reported["unit"])
@@ -391,7 +402,7 @@ def parse_pts_fio(
                         f"{item['block_size']} on {item['disk_target']}; native values used"
                     )
         if runs and (not native_units_known or any(
-            run["iops"] is None or run["errors"] is None for run in runs
+            run["throughput"] is None or run["iops"] is None or run["errors"] is None for run in runs
         )):
             complete = False
             warnings.append("incomplete native FIO run statistics")
@@ -653,6 +664,12 @@ def parse_pts_stream(
         r"(pts/stream-[0-9.]+)",
         r"Stream ([0-9][^:\r\n]*):",
     )
+    revision = re.search(r"STREAM version \$Revision:\s*([\d.]+)", text)
+    if revision:
+        versions["tool_version"] = revision.group(1)
+    validation_failed = bool(re.search(r"(?i)Failed Validation", text))
+    validation_passed = "Solution Validates:" in text
+    validation = False if validation_failed else True if validation_passed else None
     by_operation: dict[str, dict[str, Any]] = {}
     warnings: list[str] = []
     for match in PTS_RESULT_PATTERN.finditer(text):
@@ -677,22 +694,28 @@ def parse_pts_stream(
         warnings.append(f"missing STREAM operations: {', '.join(missing)}")
     if unexpected:
         warnings.append(f"unexpected STREAM operations: {', '.join(unexpected)}")
+    if validation_failed:
+        warnings.append("STREAM reported failed solution validation")
+    elif validation is None and revision:
+        warnings.append("native STREAM solution validation is missing")
     complete = (
         not missing
         and not unexpected
         and len(by_operation) == len(expected_operations)
         and versions["profile"] is not None
+        and (not revision or validation is not None)
     )
     metrics = {
         "kind": "pts_stream",
         **versions,
+        "solution_validated": validation,
         "expected_operation_count": len(expected_operations),
         "operation_count": len(by_operation),
         "operations": operations,
     }
     return parsed_result(
         "complete" if complete else "partial",
-        "pass" if complete else "unknown",
+        "fail" if validation_failed else "pass" if complete else "unknown",
         metrics,
         warnings,
     )
@@ -776,7 +799,17 @@ def parse_gpu_burn(
         for value in re.findall(r"\b\d+\b", section)
     ]
     gpu_statuses = re.findall(r"(?m)^\s*GPU\s+(\d+):\s+(OK|FAULTY|FAILED)\s*$", text)
-    gflops = [float(value) for value in re.findall(r"\(([\d.]+) Gflop/s\)", text)]
+    progress = re.findall(r"proc'd:\s*([^\r\n]*?)(?=\s+errors:|$)", text, re.MULTILINE)
+    # The display repeats the last completed work while temperatures update.
+    # Count each work update once, but retain every temperature/error reading.
+    gflops = []
+    previous_iterations = None
+    for section in progress:
+        updates = re.findall(r"(\d+)\s+\(([\d.]+) Gflop/s\)", section)
+        iterations = tuple(count for count, _ in updates)
+        if iterations != previous_iterations:
+            gflops.extend(float(value) for _, value in updates)
+        previous_iterations = iterations
     temperatures = [
         float(value)
         for section in re.findall(r"temps:\s*([^\r\n]*)", text)
@@ -818,6 +851,7 @@ def parse_gpu_burn(
             {"gpu": int(gpu), "status": value} for gpu, value in gpu_statuses
         ],
         "sample_count": len(gflops),
+        "progress_record_count": len(progress),
         "maximum_reported_errors": maximum_errors,
         "gflops_min": min(gflops) if gflops else None,
         "gflops_median": _float_stat(gflops, statistics.median),
