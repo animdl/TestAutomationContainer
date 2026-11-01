@@ -12,7 +12,7 @@ from typing import Any
 
 logger = logging.getLogger(__name__)
 
-PARSER_VERSION = 5
+PARSER_VERSION = 6
 
 ParsedResult = dict[str, Any]
 ParserFunction = Callable[[str, str, dict[str, Any]], ParsedResult]
@@ -728,14 +728,16 @@ def parse_cuda_memtest(
 ) -> ParsedResult:
     text = combined_text(stdout, stderr)
     expected = int(options["expected_passes"])
+    test_id = int(options.get("test_id", 10))
     finished_seconds = [
         float(value)
-        for value in re.findall(r"Test10 finished in ([\d.]+) seconds", text)
+        for value in re.findall(rf"\bTest{test_id} finished in ([\d.]+) seconds", text)
     ]
     allocated = re.findall(r"Allocated\s+(\d+) MB", text)
+    # Test 10 prints cudaEventElapsedTime's result directly, in milliseconds.
     pass_reports = re.findall(
         r"test10: elapsedtime=([\d.]+), bandwidth=([\d.]+) GB/s", text
-    )
+    ) if test_id == 10 else []
     error_counts = [
         int(value)
         for value in re.findall(
@@ -757,12 +759,13 @@ def parse_cuda_memtest(
     device = re.search(r"Device name=([^,\r\n]+)", text)
     metrics = {
         "kind": "cuda_memtest",
+        "test_id": test_id,
         "device_name": device.group(1) if device else None,
         "allocated_mb": int(allocated[-1]) if allocated else None,
         "expected_passes": expected,
         "completed_passes": len(finished_seconds),
         "finished_seconds": finished_seconds,
-        "reported_elapsed_times": [float(value[0]) for value in pass_reports],
+        "reported_elapsed_milliseconds": [float(value[0]) for value in pass_reports],
         "bandwidth_gb_per_second": [float(value[1]) for value in pass_reports],
         "reported_error_counts": error_counts,
         "maximum_reported_errors": maximum_errors,
@@ -771,7 +774,7 @@ def parse_cuda_memtest(
     }
     warnings = re.findall(r"(?m)^.*\bWARNING:.*$", text)
     if any(value == 0 for value in finished_seconds) and any(float(value[0]) > 0 for value in pass_reports):
-        warnings.append("cuda_memtest reports zero completion time alongside positive elapsed time; reported timings retained separately")
+        warnings.append("cuda_memtest rounds completion time to 0.0 seconds alongside positive elapsed milliseconds; reported timings retained separately")
     if not complete and outcome != "fail":
         warnings.append("expected cuda_memtest completion not found")
     return parsed_result(

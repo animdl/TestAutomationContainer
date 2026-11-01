@@ -157,15 +157,15 @@ PLAYBOOK = [
     ),
     (
         "11a", f"cuda_memtest --disable_all --enable_test 1 --num_passes {CUDA_MEMTEST_PASSES} --verbose 2",
-        ParserSpec("cuda_memtest", parse_cuda_memtest, {"expected_passes": CUDA_MEMTEST_PASSES}),
+        ParserSpec("cuda_memtest", parse_cuda_memtest, {"test_id": 1, "expected_passes": CUDA_MEMTEST_PASSES}),
     ),
     (
         "11b", f"cuda_memtest --disable_all --enable_test 2 --num_passes {CUDA_MEMTEST_PASSES} --verbose 2",
-        ParserSpec("cuda_memtest", parse_cuda_memtest, {"expected_passes": CUDA_MEMTEST_PASSES}),
+        ParserSpec("cuda_memtest", parse_cuda_memtest, {"test_id": 2, "expected_passes": CUDA_MEMTEST_PASSES}),
     ),
     (
         "11c", f"cuda_memtest --stress --num_iterations 1 --num_passes {CUDA_MEMTEST_PASSES} --verbose 2",
-        ParserSpec("cuda_memtest", parse_cuda_memtest, {"expected_passes": CUDA_MEMTEST_PASSES}),
+        ParserSpec("cuda_memtest", parse_cuda_memtest, {"test_id": 10, "expected_passes": CUDA_MEMTEST_PASSES}),
     ),
     ("12", f"gpu-burn -tc {STRESS_SECONDS}", ParserSpec("gpu_burn", parse_gpu_burn)),
     ("13a", f"nvbandwidth -t host_to_device_memcpy_ce -b 1024 -i {NVBANDWIDTH_SAMPLES} -j", ParserSpec("nvbandwidth", parse_nvbandwidth)),

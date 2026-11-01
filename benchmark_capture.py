@@ -19,7 +19,7 @@ from pathlib import Path
 from typing import Any, BinaryIO
 
 COLLECTOR_VERSION = 5
-SCHEMA_VERSION = 5
+SCHEMA_VERSION = 6
 
 
 @dataclass

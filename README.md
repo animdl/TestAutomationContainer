@@ -149,25 +149,14 @@ sanity checks, rather than prolonged hardware stability validation.
 
 ## Capture after this update
 
-CUDA tests 1 and 2 and the new bandwidth selections are ready for output capture.
-Parser and schema updates are deferred until the target run is collected. The
-current CUDA parser recognizes only test 10, so successful tests 1 and 2 will
-report incomplete parsing and can cause exit code 1. Keep their raw logs for
-the follow-up parser work.
+The parser supports CUDA tests 1, 2, and 10 and both newly added bandwidth
+selections, verified against the target captures. Allocation warnings are
+retained without marking otherwise completed CUDA tests as failed.
 
-To capture only the four newly added workloads, run:
-
-```bash
-python3 ./run-playbook-capture ./benchmark-results/parser-capture-001
-```
-
-This runs steps 11a, 11b, 13d, and 13f in their existing order: CUDA tests 1
-and 2, `device_to_host_bidirectional_memcpy_ce`, and `device_local_copy_sm`.
-It uses the same settings, Docker configuration, and result/log collection as
-the full suite. Keep `run-playbook-capture` beside `run-playbook`,
-`benchmark_capture.py`, and `benchmark_parsers.py`. The output directory must
-be new or empty; omitting it uses the usual timestamped directory. Preserve
-the entire output directory for the parser and schema update.
+The new output is in `benchmark-results/parsers-capture-001`: steps 11a, 11b,
+13d, and 13f. It covers CUDA tests 1 and 2,
+`device_to_host_bidirectional_memcpy_ce`, and `device_local_copy_sm`.
+Both bandwidth selections use the existing generic JSON parser and schema.
 
 Rebuild the image and verify the installed profile versions before the target
 run. Treat the new run as a new baseline: tool versions, FIO behavior, and the
@@ -194,7 +183,7 @@ failures rather than assuming every reported issue is a parser mismatch.
 
 Each run produces `results.json` and `raw/*.stdout.log.gz` / `raw/*.stderr.log.gz`.
 The JSON contains metrics, warnings, timings, image/source identities, and log
-sizes and hashes. Its format is defined by `results.schema.json` (version 5).
+sizes and hashes. Its format is defined by `results.schema.json` (version 6).
 
 - `execution_status`: command execution state.
 - `collection_status`: parsing completeness.
@@ -222,7 +211,16 @@ active container; cleanup failures are recorded in warnings and stderr.
 | `2` | Handled setup or runner error. |
 | `130` | Interrupted. |
 
-Schema/parser version 5 distinguishes FIO `throughput_source` values
+Schema/parser version 6 adds CUDA `test_id` and replaces the ambiguous
+`reported_elapsed_times` field with `reported_elapsed_milliseconds`. Test 10's
+`elapsedtime` is the raw CUDA event measurement in milliseconds, as defined by
+the [CUDA runtime API](https://docs.nvidia.com/cuda/cuda-runtime-api/cuda_runtime_api/group__CUDART__EVENT.html).
+`finished_seconds` separately retains the tool's wall-time completion message,
+rounded to one decimal place; 0.0 does not imply zero work. Tests 1 and 2 report
+only this wall time, so their event-time and bandwidth arrays are empty. Existing
+capture files are preserved with their original schema and parser versions.
+
+FIO distinguishes `throughput_source` values
 `native_summary`, `native_statistics`, and `pts`; each native run also retains
 `summary_throughput` separately from sampled `throughput` statistics. STREAM
 records `solution_validated` (null when unavailable) and the native revision.
@@ -234,5 +232,5 @@ means across work updates, not time-weighted measurements.
 
 See [the target run review](benchmark-review-20261031.md) for findings from
 the 2026-10-31 capture. Replay and regression checks require `jsonschema`:
-`python -m unittest test_benchmark_parsers -v`. The replay check skips when
-the original capture directory is absent.
+`python -m unittest discover -s tests -v`. Replay checks skip when their
+original capture directories are absent.

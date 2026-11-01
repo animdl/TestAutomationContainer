@@ -1,6 +1,6 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
-  "$id": "https://example.invalid/workstation-benchmark-results-v5.schema.json",
+  "$id": "https://example.invalid/workstation-benchmark-results-v6.schema.json",
   "title": "Workstation benchmark results",
   "type": "object",
   "additionalProperties": false,
@@ -19,7 +19,7 @@
     "errors"
   ],
   "properties": {
-    "schema_version": {"const": 5},
+    "schema_version": {"const": 6},
     "collector": {
       "type": "object",
       "additionalProperties": false,
@@ -511,19 +511,26 @@
       "type": "object",
       "additionalProperties": false,
       "required": [
-        "kind", "device_name", "allocated_mb", "expected_passes", "completed_passes",
-        "finished_seconds", "reported_elapsed_times", "bandwidth_gb_per_second",
+        "kind", "test_id", "device_name", "allocated_mb", "expected_passes", "completed_passes",
+        "finished_seconds", "reported_elapsed_milliseconds", "bandwidth_gb_per_second",
         "reported_error_counts", "maximum_reported_errors", "completion_marker_found",
         "failure_marker_found"
       ],
       "properties": {
         "kind": {"const": "cuda_memtest"},
+        "test_id": {"type": "integer", "enum": [1, 2, 10]},
         "device_name": {"$ref": "#/$defs/nullable_string"},
         "allocated_mb": {"$ref": "#/$defs/nullable_integer"},
         "expected_passes": {"type": "integer", "minimum": 1},
         "completed_passes": {"type": "integer", "minimum": 0},
-        "finished_seconds": {"type": "array", "items": {"type": "number"}},
-        "reported_elapsed_times": {"type": "array", "items": {"type": "number"}},
+        "finished_seconds": {
+          "description": "Per-pass wall time from TestN finished in ... seconds, rounded by the tool to one decimal place. A reported 0.0 may represent a sub-0.05-second run.",
+          "type": "array", "items": {"type": "number", "minimum": 0}
+        },
+        "reported_elapsed_milliseconds": {
+          "description": "Raw CUDA event elapsedtime values from test 10, in milliseconds. Empty for tests 1 and 2, which do not report this measurement.",
+          "type": "array", "items": {"type": "number", "minimum": 0}
+        },
         "bandwidth_gb_per_second": {"type": "array", "items": {"type": "number"}},
         "reported_error_counts": {"type": "array", "items": {"type": "integer"}},
         "maximum_reported_errors": {"$ref": "#/$defs/nullable_integer"},
