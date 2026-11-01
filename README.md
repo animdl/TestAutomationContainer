@@ -1,6 +1,6 @@
 # Workstation Benchmark Container
 
-Runs 21 NVMe, RAM, CPU, and NVIDIA GPU checks in Docker. Results and
+Runs 24 NVMe, RAM, CPU, and NVIDIA GPU checks in Docker. Results and
 compressed logs are saved on the host.
 
 ## Requirements
@@ -110,8 +110,9 @@ allow later steps to run; cancellation and runner errors stop the sequence.
 | 5 | FIO: all 16 configurations, two PTS runs each to capture multi-sample statistics; each run has a 20-second workload, five-second start delay, and five-second ramp. |
 | 6–7 | `memtester`: 2 GiB, one loop; PTS stressapptest: 2000 MB, 32 memory-copy threads, 60 seconds. |
 | 8–10 | Native CPU stress at 75% for 60 seconds, one 90-second sysbench CPU run, and one PTS run for each STREAM operation. |
-| 11–12 | CUDA memory stress: one iteration, one pass of test 10; GPU burn: 60 seconds. |
-| 13a–13e | Five host/device and device-local bandwidth tests, three samples each. |
+| 11a–11c | CUDA memory tests 1 (own address), 2 (moving inversions, ones and zeros), then 10 (stress): one pass each, verbosity 2; stress uses one iteration. |
+| 12 | GPU burn: 60 seconds. |
+| 13a–13f | nvbandwidth: `host_to_device_memcpy_ce`, `device_to_host_memcpy_ce`, `host_to_device_bidirectional_memcpy_ce`, `device_to_host_bidirectional_memcpy_ce`, `device_local_copy`, then `device_local_copy_sm`; 1024 MiB buffer, three samples each. |
 | 14a–14b | Native CPU stress at 100% and GPU burn together for 60 seconds. |
 
 `PLAYBOOK` in `run-playbook` defines execution order and concurrency. Tuple
@@ -147,6 +148,26 @@ short NVMe self-tests have hardware-dependent runtimes; they do not have a
 sanity checks, rather than prolonged hardware stability validation.
 
 ## Capture after this update
+
+CUDA tests 1 and 2 and the new bandwidth selections are ready for output capture.
+Parser and schema updates are deferred until the target run is collected. The
+current CUDA parser recognizes only test 10, so successful tests 1 and 2 will
+report incomplete parsing and can cause exit code 1. Keep their raw logs for
+the follow-up parser work.
+
+To capture only the four newly added workloads, run:
+
+```bash
+python3 ./run-playbook-capture ./benchmark-results/parser-capture-001
+```
+
+This runs steps 11a, 11b, 13d, and 13f in their existing order: CUDA tests 1
+and 2, `device_to_host_bidirectional_memcpy_ce`, and `device_local_copy_sm`.
+It uses the same settings, Docker configuration, and result/log collection as
+the full suite. Keep `run-playbook-capture` beside `run-playbook`,
+`benchmark_capture.py`, and `benchmark_parsers.py`. The output directory must
+be new or empty; omitting it uses the usual timestamped directory. Preserve
+the entire output directory for the parser and schema update.
 
 Rebuild the image and verify the installed profile versions before the target
 run. Treat the new run as a new baseline: tool versions, FIO behavior, and the

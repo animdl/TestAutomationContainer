@@ -156,7 +156,15 @@ PLAYBOOK = [
         ParserSpec("pts_stream", parse_pts_stream, {"expected_operations": STREAM_OPERATIONS}),
     ),
     (
-        "11", f"cuda_memtest --stress --num_iterations 1 --num_passes {CUDA_MEMTEST_PASSES} --verbose 2",
+        "11a", f"cuda_memtest --disable_all --enable_test 1 --num_passes {CUDA_MEMTEST_PASSES} --verbose 2",
+        ParserSpec("cuda_memtest", parse_cuda_memtest, {"expected_passes": CUDA_MEMTEST_PASSES}),
+    ),
+    (
+        "11b", f"cuda_memtest --disable_all --enable_test 2 --num_passes {CUDA_MEMTEST_PASSES} --verbose 2",
+        ParserSpec("cuda_memtest", parse_cuda_memtest, {"expected_passes": CUDA_MEMTEST_PASSES}),
+    ),
+    (
+        "11c", f"cuda_memtest --stress --num_iterations 1 --num_passes {CUDA_MEMTEST_PASSES} --verbose 2",
         ParserSpec("cuda_memtest", parse_cuda_memtest, {"expected_passes": CUDA_MEMTEST_PASSES}),
     ),
     ("12", f"gpu-burn -tc {STRESS_SECONDS}", ParserSpec("gpu_burn", parse_gpu_burn)),
@@ -167,10 +175,11 @@ PLAYBOOK = [
         ParserSpec("nvbandwidth", parse_nvbandwidth),
     ),
     (
-        "13d", f"nvbandwidth -t host_to_device_bidirectional_memcpy_sm -b 1024 -i {NVBANDWIDTH_SAMPLES} -j",
+        "13d", f"nvbandwidth -t device_to_host_bidirectional_memcpy_ce -b 1024 -i {NVBANDWIDTH_SAMPLES} -j",
         ParserSpec("nvbandwidth", parse_nvbandwidth),
     ),
     ("13e", f"nvbandwidth -t device_local_copy -b 1024 -i {NVBANDWIDTH_SAMPLES} -j", ParserSpec("nvbandwidth", parse_nvbandwidth)),
+    ("13f", f"nvbandwidth -t device_local_copy_sm -b 1024 -i {NVBANDWIDTH_SAMPLES} -j", ParserSpec("nvbandwidth", parse_nvbandwidth)),
     [
         ("14a", cpu_stress_command(COMBINED_CPU_LOAD_PERCENT, combined=True),
          ParserSpec("stress_ng", parse_stress_ng, {
