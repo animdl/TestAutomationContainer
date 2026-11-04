@@ -6,7 +6,9 @@ import gzip
 import hashlib
 import json
 import os
+import platform
 import re
+import shlex
 import shutil
 import signal
 import subprocess
@@ -18,8 +20,33 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, BinaryIO
 
-COLLECTOR_VERSION = 5
-SCHEMA_VERSION = 6
+COLLECTOR_VERSION = 8
+SCHEMA_VERSION = 9
+
+
+def host_system_info() -> dict[str, str | None]:
+    """Read the runner host's OS label and kernel without invoking any tools."""
+    release = {}
+    try:
+        for line in Path("/etc/os-release").read_text(encoding="utf-8").splitlines():
+            key, separator, value = line.partition("=")
+            if separator and key in ("PRETTY_NAME", "NAME"):
+                release[key] = " ".join(shlex.split(value))
+    except (OSError, ValueError):
+        pass
+    return {"os": release.get("PRETTY_NAME") or release.get("NAME"),
+            "kernel": platform.release()}
+
+
+def pts_system_summary(text: str) -> str | None:
+    """Keep PTS's readable system summary, excluding subsequent workload output."""
+    text = text.replace("\r\n", "\n")
+    header = re.search(r"(?m)^Phoronix Test Suite v[^\n]+\nSystem Information\n=+[ \t]*\n", text)
+    if header is None:
+        return None
+    body = re.split(r"(?m)^Running Pre-Test Script[ \t]*$|^[=#]{10,}[ \t]*$",
+                    text[header.end():], maxsplit=1)[0].strip()
+    return body or None
 
 
 @dataclass

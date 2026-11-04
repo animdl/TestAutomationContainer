@@ -1,6 +1,6 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
-  "$id": "https://example.invalid/workstation-benchmark-results-v6.schema.json",
+  "$id": "https://example.invalid/workstation-benchmark-results-v9.schema.json",
   "title": "Workstation benchmark results",
   "type": "object",
   "additionalProperties": false,
@@ -9,6 +9,7 @@
     "collector",
     "run_id",
     "image",
+    "system",
     "suite",
     "started_at",
     "finished_at",
@@ -19,7 +20,7 @@
     "errors"
   ],
   "properties": {
-    "schema_version": {"const": 6},
+    "schema_version": {"const": 9},
     "collector": {
       "type": "object",
       "additionalProperties": false,
@@ -49,6 +50,7 @@
         }
       }
     },
+    "system": {"oneOf": [{"type": "null"}, {"$ref": "#/$defs/system_info"}]},
     "suite": {
       "type": "object",
       "additionalProperties": false,
@@ -88,6 +90,22 @@
     "errors": {"$ref": "#/$defs/string_array"}
   },
   "$defs": {
+    "system_info": {
+      "type": "object", "additionalProperties": false,
+      "required": ["host", "pts_summary", "pts_summary_step"],
+      "properties": {
+        "host": {
+          "type": "object", "additionalProperties": false,
+          "required": ["os", "kernel"],
+          "properties": {
+            "os": {"type": ["string", "null"]},
+            "kernel": {"type": ["string", "null"]}
+          }
+        },
+        "pts_summary": {"type": ["string", "null"]},
+        "pts_summary_step": {"type": ["string", "null"]}
+      }
+    },
     "sha256": {
       "type": "string",
       "pattern": "^[0-9a-f]{64}$"
@@ -640,11 +658,53 @@
         "sample_count": {"type": "integer", "minimum": 0}
       }
     },
+    "fio_completion_latency": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "unit",
+        "mean",
+        "maximum",
+        "percentiles"
+      ],
+      "properties": {
+        "unit": {
+          "const": "us"
+        },
+        "mean": {
+          "type": "number",
+          "minimum": 0
+        },
+        "maximum": {
+          "type": "number",
+          "minimum": 0
+        },
+        "percentiles": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "50": {
+              "type": "number",
+              "minimum": 0
+            },
+            "95": {
+              "type": "number",
+              "minimum": 0
+            },
+            "99": {
+              "type": "number",
+              "minimum": 0
+            }
+          }
+        }
+      }
+    },
     "fio_run": {
       "type": "object",
       "additionalProperties": false,
-      "required": ["run", "errors", "duration_seconds", "throughput", "summary_throughput", "iops"],
+      "required": ["run", "errors", "duration_seconds", "throughput", "summary_throughput", "iops", "completion_latency"],
       "properties": {
+        "completion_latency": {"oneOf": [{"type": "null"}, {"$ref": "#/$defs/fio_completion_latency"}]},
         "summary_throughput": {
           "oneOf": [
             {"type": "null"},

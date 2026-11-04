@@ -8,6 +8,7 @@ import re
 import subprocess
 import sys
 import xml.etree.ElementTree as ET
+from fio_profile import verify_launcher
 
 MANIFEST = Path('/usr/local/share/benchmark/pts-profiles')
 PTS_ROOT = Path(os.environ.get('PTS_USER_PATH_OVERRIDE', '/var/lib/phoronix-test-suite'))
@@ -39,6 +40,8 @@ def verify_profile(identifier, root=PTS_ROOT):
         launcher = directory / executable
         if not launcher.is_file() or not os.access(launcher, os.X_OK):
             raise ValueError(f'PTS launcher is missing or not executable: {launcher}')
+        if identifier.startswith('pts/fio-'):
+            print('FIO launcher customization: ' + verify_launcher(launcher), flush=True)
     except (OSError, ValueError, KeyError, ET.ParseError) as exc:
         # batch-install can return zero after a failed compile/download.
         for name in ('install-failed.log', 'install.log'):

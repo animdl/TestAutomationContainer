@@ -12,7 +12,7 @@ from typing import Any
 
 logger = logging.getLogger(__name__)
 
-PARSER_VERSION = 6
+PARSER_VERSION = 7
 
 ParsedResult = dict[str, Any]
 ParserFunction = Callable[[str, str, dict[str, Any]], ParsedResult]
@@ -299,6 +299,32 @@ def _fio_statistics(text: str, name: str) -> dict[str, Any] | None:
     }
 
 
+def _fio_completion_latency(text: str) -> dict[str, Any] | None:
+    number = r"\d+(?:\.\d+)?(?:[eE][+-]?\d+)?"
+    factors = {"nsec": 0.001, "usec": 1, "msec": 1000}
+    # fio's num2str() abbreviates min/max with decimal SI prefixes.
+    prefixes = {prefix: 1000 ** exponent for exponent, prefix in enumerate(("", "k", "M", "G", "T", "P", "E"))}
+    summary = re.search(
+        rf"(?m)^\s*clat \((nsec|usec|msec)\):\s*min=\s*{number}[kMGTPE]?,\s*"
+        rf"max=\s*({number})([kMGTPE]?),\s*avg=\s*({number})", text,
+    )
+    if summary is None:
+        return None
+    percentiles = re.search(
+        r"clat percentiles \((nsec|usec|msec)\):\s*\n((?:[ \t]*\|[^\n]*(?:\n|$))+)", text,
+    )
+    values = {}
+    if percentiles:
+        for percentile, value in re.findall(rf"({number})th=\[\s*({number})\]", percentiles.group(2)):
+            key = str(int(float(percentile))) if float(percentile).is_integer() else percentile
+            if key in ("50", "95", "99"):
+                values[key] = float(value) * factors[percentiles.group(1)]
+    factor = factors[summary.group(1)]
+    return {"unit": "us", "mean": float(summary.group(4)) * factor,
+            "maximum": float(summary.group(2)) * prefixes[summary.group(3)] * factor,
+            "percentiles": values}
+
+
 def parse_pts_fio(
     stdout: str, stderr: str, options: dict[str, Any],
 ) -> ParsedResult:
@@ -363,6 +389,7 @@ def parse_pts_fio(
                 if summary else None
             ),
             "iops": _fio_statistics(body, "iops"),
+            "completion_latency": _fio_completion_latency(body),
         })
 
     factors = {"B/s": 1 / 1048576, "KiB/s": 1 / 1024, "MiB/s": 1,
@@ -407,6 +434,14 @@ def parse_pts_fio(
             complete = False
             warnings.append("incomplete native FIO run statistics")
         failed |= any(run["errors"] not in (None, 0) for run in runs)
+        if options.get("require_latency") and (not runs or any(
+            run["completion_latency"] is None
+            or set(run["completion_latency"]["percentiles"]) != {"50", "95", "99"}
+            for run in runs
+        )):
+            complete = False
+            warnings.append(f"missing required FIO completion latency for {item['workload']} "
+                            f"{item['block_size']} on {item['disk_target']}")
         for field in ("throughput", "iops"):
             measurement = item[field]
             if measurement is None:
@@ -420,6 +455,15 @@ def parse_pts_fio(
             complete = False
             warnings.append("native FIO run numbers do not match expected repetitions")
     configurations = list(grouped.values())
+    if "expected_workloads" in options:
+        expected_pairs = {(workload, options["expected_block_size"], target)
+                          for workload in options["expected_workloads"]
+                          for target in options["expected_targets"]}
+        actual_pairs = {(item["workload"], item["block_size"], item["disk_target"])
+                        for item in configurations}
+        if actual_pairs != expected_pairs:
+            complete = False
+            warnings.append("FIO workload/block-size/target combinations do not match expected stage")
     expected = int(options["expected_configurations"])
     if len(configurations) != expected:
         complete = False

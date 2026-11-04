@@ -19,6 +19,8 @@ from benchmark_capture import (
     execute_command,
     execute_commands,
     inspect_image,
+    host_system_info,
+    pts_system_summary,
     read_parser_text,
     source_manifest,
     suite_hash,
@@ -60,8 +62,8 @@ BENCH_MOUNTS = (
 
 NVME0_DEVICE = "/dev/nvme0n1"
 NVME1_DEVICE = "/dev/nvme1n1"
-FIO_WORKLOADS = ("randread", "randwrite", "read", "write")
-FIO_BLOCK_SIZES = ("4k", "2m")
+FIO_GROUPS = (("5a", ("read", "write"), "2m"),
+              ("5b", ("randread", "randwrite"), "4k"))
 MEMTESTER_LOOPS = 1
 CUDA_MEMTEST_PASSES = 1
 STRESS_SECONDS = 60
@@ -70,14 +72,15 @@ COMBINED_CPU_LOAD_PERCENT = 100
 NVBANDWIDTH_SAMPLES = 3
 STREAM_OPERATIONS = ("Copy", "Scale", "Add", "Triad")
 
-FIO_OPTIONS = (
-    f"fio.type={','.join(FIO_WORKLOADS)};"
-    "fio.engine=libaio;"
-    "fio.buffered=0;"
-    "fio.direct=1;"
-    f"fio.size={','.join(FIO_BLOCK_SIZES)};"
-    f"fio.auto-disk-mount-points={','.join(target for _, target in BENCH_MOUNTS)}"
-)
+def fio_options(workloads, block_size):
+    return (
+        f"fio.type={','.join(workloads)};"
+        "fio.engine=libaio;"
+        "fio.buffered=0;"
+        "fio.direct=1;"
+        f"fio.size={block_size};"
+        f"fio.auto-disk-mount-points={','.join(target for _, target in BENCH_MOUNTS)}"
+    )
 
 STREAM_OPTIONS = f"stream.run-type={','.join(STREAM_OPERATIONS)}"
 
@@ -125,14 +128,15 @@ PLAYBOOK = [
         "4b", f"nvme self-test-log {NVME1_DEVICE} -o json",
         ParserSpec("nvme_self_test_log", parse_nvme_self_test_log, {"device": NVME1_DEVICE}),
     ),
-    (
-        "5",
-        pts_command("pts/fio", FIO_OPTIONS, runs=2),
+    *[(step, pts_command("pts/fio", fio_options(workloads, block_size), runs=2),
         ParserSpec("pts_fio", parse_pts_fio, {
-            "expected_configurations": len(FIO_WORKLOADS) * len(FIO_BLOCK_SIZES) * len(BENCH_MOUNTS),
+            "expected_configurations": len(workloads) * len(BENCH_MOUNTS),
             "expected_samples": 2,
-        }),
-    ),
+            "require_latency": True,
+            "expected_workloads": workloads,
+            "expected_block_size": block_size,
+            "expected_targets": [target for _, target in BENCH_MOUNTS],
+        })) for step, workloads, block_size in FIO_GROUPS],
     (
         "6", f"memtester 2G {MEMTESTER_LOOPS}",
         ParserSpec("memtester", parse_memtester, {"expected_loops": MEMTESTER_LOOPS}),
@@ -266,6 +270,7 @@ def build_initial_results(run_id, image, started_at):
         },
         "run_id": run_id,
         "image": image,
+        "system": {"host": host_system_info(), "pts_summary": None, "pts_summary_step": None},
         "suite": {
             "command_sha256": suite_hash([(step, command) for step, command, _ in TESTS]),
             "test_count": len(TESTS),
@@ -304,6 +309,14 @@ def collect_step(step, parser, output_dir, results, prepared, execution):
     print(stdout, end="", flush=True)
     if stderr:
         print(stderr, end="", file=sys.stderr, flush=True)
+
+    if results["system"]["pts_summary"] is None and parser.name in (
+        "pts_fio", "pts_stream", "stressapptest", "sysbench",
+    ):
+        summary = pts_system_summary(stdout)
+        if summary:
+            results["system"]["pts_summary"] = summary
+            results["system"]["pts_summary_step"] = step
 
     parsed = parse_output(parser, stdout, stderr)
     warnings = list(parsed["warnings"])

@@ -1,6 +1,6 @@
 # Workstation Benchmark Container
 
-Runs 24 NVMe, RAM, CPU, and NVIDIA GPU checks in Docker. Results and
+Runs 25 NVMe, RAM, CPU, and NVIDIA GPU checks in Docker. Results and
 compressed logs are saved on the host.
 
 ## Requirements
@@ -49,12 +49,36 @@ older source assumes are included indirectly; the flag applies only to that
 profile's installation.
 When updating pins, check whether the new profile requires changes to the
 runner's workload options.
-PTS itself and the other Git sources remain unpinned. Retain the built image
-for comparisons.
+All four Git repositories are pinned to full commit hashes in Dockerfile build
+arguments, resolved from their upstream default branches on 2026-11-03:
+
+| Build argument | Repository | Commit |
+| --- | --- | --- |
+| `PTS_COMMIT` | phoronix-test-suite/phoronix-test-suite | `1bc6fc9c831f5941157541e46c5658d994cab110` |
+| `GPU_BURN_COMMIT` | wilicc/gpu-burn | `0d19c94dcb2e9b6858b7586a4c327674cd67113b` |
+| `NVBANDWIDTH_COMMIT` | NVIDIA/nvbandwidth | `82fc4e8c6afa0babb8687793678f615b3b8d793e` |
+| `CUDA_MEMTEST_COMMIT` | ComputationalRadiationPhysics/cuda_memtest | `e94e1ee54e0689c9f154a8a08202554452552ec6` |
+
+Each build shallow-fetches the requested commit, checks it out detached, and
+verifies that HEAD matches the full hash. To deliberately update a source, edit
+its pin or supply its build argument with a full commit hash. Revalidate tool
+output and establish a new baseline when changing pins. These revisions capture
+current upstream sources, not necessarily those used by an older built image.
+APT packages and the CUDA base-image tag can still change; retain the built
+image for comparisons.
 
 FIO is pinned to `pts/fio-1.15.0` (fio 3.29). It uses the profile's single-job
 launcher with Linux AIO, direct I/O, and `fio.buffered=0`. No job-count preset
 is supplied because this profile does not expose one.
+
+The image applies `benchmark-fio-latency-v1` to the installed FIO launcher using
+`fio_profile.py`. It replaces exactly one known upstream latency-disable block,
+enables latency measurement and completion percentiles 50/95/99, and fails the
+build if the expected block differs. `pts-profile` verifies this customization
+and prints the launcher SHA-256 into each FIO stage's raw log. The customization
+requires profile 1.15.0; changing that pin requires reviewing the override.
+Queue depth 64, one job, the 1 GiB test file, 20-second measured workload,
+five-second start delay, and five-second ramp remain unchanged.
 
 ## 2. Verify mounts
 
@@ -88,7 +112,8 @@ python3 ./run-playbook
 ```
 
 Run on the host, keeping `run-playbook`, `benchmark_capture.py`, and
-`benchmark_parsers.py` together. `BENCH_IMAGE` defaults to `bench:latest`.
+`benchmark_parsers.py` together.
+`BENCH_IMAGE` defaults to `bench:latest`.
 The rebuilt image must include the Dockerfile-generated profile manifest and
 `pts-profile` helper.
 
@@ -107,7 +132,7 @@ allow later steps to run; cancellation and runner errors stop the sequence.
 | Steps | Checks |
 | --- | --- |
 | 2a–4b | SMART health, short self-tests, and self-test logs for both NVMe devices. |
-| 5 | FIO: all 16 configurations, two PTS runs each to capture multi-sample statistics; each run has a 20-second workload, five-second start delay, and five-second ramp. |
+| 5a–5b | FIO: sequential read/write at 2 MiB, then random read/write at 4 KiB, on both targets. Each stage has four configurations and two PTS runs per configuration. Latency is collected during these same runs. |
 | 6–7 | `memtester`: 2 GiB, one loop; PTS stressapptest: 2000 MB, 32 memory-copy threads, 60 seconds. |
 | 8–10 | Native CPU stress at 75% for 60 seconds, one 90-second sysbench CPU run, and one PTS run for each STREAM operation. |
 | 11a–11c | CUDA memory tests 1 (own address), 2 (moving inversions, ones and zeros), then 10 (stress): one pass each, verbosity 2; stress uses one iteration. |
@@ -137,8 +162,9 @@ all detected logical CPUs, and default 90-second duration.
 NVMe self-tests explicitly select the short test (`-s 1`), not the extended test.
 SMART and self-test log commands only read status.
 
-FIO takes roughly 16 minutes across 16 configurations with two runs each,
-before PTS overhead. Its runtime and startup timings come from the pinned
+FIO has eight configurations and two runs each: roughly eight minutes of
+workload/startup/ramp time, before PTS overhead. Its runtime and startup timings
+come from the pinned
 1.15.0 profile (fio 3.29). STREAM is pinned to 1.3.4 to avoid the broken
 exit-status line in the 1.3.5 launcher.
 STREAM retains the profile binary's internal 100 iterations per operation even
@@ -168,8 +194,9 @@ The parser recognizes missing-profile notices and PHP fatal errors as failed
 outcomes even if PTS returns zero. `execution_status` and `exit_code` retain the
 actual process result; these failures are recorded in per-test warnings.
 Sysbench selects `sysbench.run-test=cpu` without injecting a duration override.
-PTS source and generated launchers are left unmodified. Rebuild the image to
-apply the FIO/STREAM pins.
+PTS source is left unmodified. The FIO launcher has the guarded latency
+customization described above. Rebuild the image before using the new stages;
+an older image without that customization will be rejected by the new helper.
 `pts-profile` also checks that every profile option has an explicit workload
 preset before launching PTS, so profile changes cannot silently add workloads or
 fall through to broken noninteractive prompts.
@@ -183,7 +210,21 @@ failures rather than assuming every reported issue is a parser mismatch.
 
 Each run produces `results.json` and `raw/*.stdout.log.gz` / `raw/*.stderr.log.gz`.
 The JSON contains metrics, warnings, timings, image/source identities, and log
-sizes and hashes. Its format is defined by `results.schema.json` (version 6).
+sizes and hashes. Its format is defined by `results.schema.json` (version 9).
+
+`system.host` records the host OS label from `/etc/os-release` and the host
+kernel version. `system.pts_summary` stores the first available PTS system
+summary as readable text, with its source step in `system.pts_summary_step`.
+It reuses existing test output for CPU, GPU, RAM, drive, motherboard, and BIOS
+information without extra inventory commands or dependencies. The PTS summary
+comes from inside Docker, so its operating-system label may describe the
+container; use `system.host` for the host OS/kernel.
+
+The host record is present in the initial checkpoint. Summary fields remain
+null until PTS emits a system summary; later summaries do not overwrite it.
+Missing information does not change benchmark outcomes. Schema version 9
+replaces the detailed inventory with this compact record; existing results
+are not rewritten and historical replay uses null for unavailable metadata.
 
 - `execution_status`: command execution state.
 - `collection_status`: parsing completeness.
@@ -210,6 +251,17 @@ active container; cleanup failures are recorded in warnings and stderr.
 | `1` | Sequence finished with issues. |
 | `2` | Handled setup or runner error. |
 | `130` | Interrupted. |
+
+Schema/parser version 7 adds per-repetition FIO `completion_latency`: mean,
+maximum, and p50/p95/p99, normalized to microseconds (`unit: "us"`). Percentiles
+remain separate for each repetition and are not averaged. Historical logs parsed
+without a latency requirement retain null when no completion-latency summary
+exists; incomplete percentile sets are retained with missing keys. New stages
+require the mean, maximum, and all three percentiles; missing latency makes
+collection partial, while explicit I/O errors still produce failed outcomes.
+The parser verifies the expected workload/block-size/target combinations for
+each new stage. Original captures are not rewritten or migrated.
+Enabling timing instrumentation can affect throughput; establish a new baseline.
 
 Schema/parser version 6 adds CUDA `test_id` and replaces the ambiguous
 `reported_elapsed_times` field with `reported_elapsed_milliseconds`. Test 10's
