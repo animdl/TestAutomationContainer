@@ -252,6 +252,10 @@ active container; cleanup failures are recorded in warnings and stderr.
 | `2` | Handled setup or runner error. |
 | `130` | Interrupted. |
 
+Parser version 8 corrects NVMe `valid_report_count` to exclude unused self-test
+history slots (result code 15). Latest-result outcomes are unchanged. The schema
+remains version 9, and existing captures are not rewritten.
+
 Schema/parser version 7 adds per-repetition FIO `completion_latency`: mean,
 maximum, and p50/p95/p99, normalized to microseconds (`unit: "us"`). Percentiles
 remain separate for each repetition and are not averaged. Historical logs parsed

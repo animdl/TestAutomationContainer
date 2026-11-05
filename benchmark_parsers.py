@@ -12,7 +12,7 @@ from typing import Any
 
 logger = logging.getLogger(__name__)
 
-PARSER_VERSION = 7
+PARSER_VERSION = 8
 
 ParsedResult = dict[str, Any]
 ParserFunction = Callable[[str, str, dict[str, Any]], ParsedResult]
@@ -211,7 +211,12 @@ def parse_nvme_self_test_log(
         "device": options["device"],
         "current_operation": operation,
         "current_completion_percent": completion,
-        "valid_report_count": len(reports),
+        # nvme-cli includes unused slots (result 0xf) in its report array.
+        "valid_report_count": sum(
+            isinstance(report, dict)
+            and _integer_or_none(report.get("Self test result")) not in (None, 15)
+            for report in reports
+        ),
         "latest_report": latest_report,
     }
     result_code = latest_report["result_code"]
