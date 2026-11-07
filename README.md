@@ -1,19 +1,34 @@
 # Workstation Benchmark Container
 
-Runs 25 NVMe, RAM, CPU, and NVIDIA GPU checks in Docker. Results and
-compressed logs are saved on the host.
+Benchmarks and stress-tests edge workstations (NVMe, RAM, CPU, NVIDIA GPU) with
+a fixed, pinned tool set, so results from different runs and machines can be
+compared over time. A host-side runner launches each of the 25 steps in its own
+Docker container, captures stdout/stderr, parses every tool's output, and writes
+`results.json` plus compressed raw logs.
+
+The suite runs privileged containers, writes benchmark files, and applies heavy
+hardware load. Verify the target drives before running it.
 
 ## Requirements
 
-Run the commands below in Bash on the Linux workstation, from the repository root.
+Run everything in Bash on the Linux workstation, from the repository root.
 
-- Docker with NVIDIA GPU support and a working host NVIDIA driver.
-- Host Python 3.9+, Bash, and `findmnt`. The runner needs no Python packages.
+- Docker with the NVIDIA Container Toolkit, and a working host NVIDIA driver
+  (`nvidia-smi` on the host).
+- [uv](https://docs.astral.sh/uv/) 0.13.7 or newer. It installs the pinned Python
+  (`.python-version`) on first use; the runner itself needs no other packages.
+- `findmnt` (util-linux).
 - Two mounted NVMe filesystems with dedicated benchmark directories.
-- Internet access to build the image.
+- Internet access to build the image and for uv's first run.
 
-The suite uses privileged containers, writes benchmark files, and applies heavy
-hardware load. Verify the target drives before running it.
+## Layout
+
+| Path | Runs on | Contents |
+| --- | --- | --- |
+| `Dockerfile` | build | The pinned image. Its build context is only `container/`. |
+| `container/` | in the image | `pts-profile` (pinned PTS launcher), `fio_profile.py` (FIO latency customization), `combined-start` (CPU/GPU start barrier). |
+| `src/benchsuite/` | host | `playbook.py` (suite definition), `runner.py`, `capture.py`, `parsers.py`, `results.schema.json`. |
+| `scripts/` | host | `verify-mounts`. |
 
 ## 1. Build
 
@@ -22,67 +37,45 @@ export BENCH_IMAGE=bench:latest
 docker build -t "$BENCH_IMAGE" .
 
 docker run --rm --gpus all "$BENCH_IMAGE" nvidia-smi
-docker run --rm "$BENCH_IMAGE" stress-ng --version
 docker run --rm "$BENCH_IMAGE" pts-profile verify
-docker run --rm "$BENCH_IMAGE" phoronix-test-suite list-installed-tests
 ```
 
-Defaults: Ubuntu 24.04, CUDA 12.6.3, CUDA architecture `89`. Set `CUDA_VERSION`
-and `CUDA_ARCH` through Docker's `--build-arg` if needed for your GPU.
+`CUDA_ARCH` defaults to `89`; set it with `--build-arg` for other GPUs. The build
+fails if any pinned PTS profile did not install, even when PTS reported success.
 
-Stress-ng is installed directly from Ubuntu packages in the container and run
-without PTS. Each CPU stress step captures `stress-ng --version`; the package
-version can change when the image is rebuilt.
+### What is pinned
 
-The Dockerfile's `PTS_TESTS` argument is the single source of PTS profile version
-pins. The build writes these pins into `/usr/local/share/benchmark/pts-profiles`.
-The runner refers to base profile names; `pts-profile` resolves them through that
-manifest and invokes PTS with the exact version, avoiding latest-version lookup.
-The build verifies every pinned installation and launcher and fails with install
-log excerpts if any are missing or failed, even when PTS returns exit code zero.
-The image explicitly installs profile extraction and build dependencies, including
-`bzip2` for STREAM and PHP ZIP support for PTS.
-APT package lists remain available during PTS installation for dependency
-resolution. The PTS path override includes its required trailing slash.
-Stressapptest is built with `-include cstdint` to supply the integer types its
-older source assumes are included indirectly; the flag applies only to that
-profile's installation.
-When updating pins, check whether the new profile requires changes to the
-runner's workload options.
-All four Git repositories are pinned to full commit hashes in Dockerfile build
-arguments, resolved from their upstream default branches on 2026-11-03:
-
-| Build argument | Repository | Commit |
+| Input | Pin | Where |
 | --- | --- | --- |
-| `PTS_COMMIT` | phoronix-test-suite/phoronix-test-suite | `1bc6fc9c831f5941157541e46c5658d994cab110` |
-| `GPU_BURN_COMMIT` | wilicc/gpu-burn | `0d19c94dcb2e9b6858b7586a4c327674cd67113b` |
-| `NVBANDWIDTH_COMMIT` | NVIDIA/nvbandwidth | `82fc4e8c6afa0babb8687793678f615b3b8d793e` |
-| `CUDA_MEMTEST_COMMIT` | ComputationalRadiationPhysics/cuda_memtest | `e94e1ee54e0689c9f154a8a08202554452552ec6` |
+| Base image | `nvidia/cuda:12.6.3-devel-ubuntu24.04` by digest | `CUDA_IMAGE_DIGEST` |
+| Ubuntu packages | Archive snapshot `20261103T000000Z` | `UBUNTU_SNAPSHOT` |
+| stress-ng, memtester, nvme-cli | Exact package versions | `STRESS_NG_VERSION`, `MEMTESTER_VERSION`, `NVME_CLI_VERSION` |
+| GCC 13 (builds every source-built test) | Exact package version | `GCC_VERSION` |
+| PTS, gpu-burn, nvbandwidth, cuda_memtest | Full Git commit hashes, checked after checkout | `*_COMMIT` |
+| PTS test profiles | `pts/fio-1.15.0`, `pts/stream-1.3.4`, `pts/stressapptest-1.0.1`, `pts/sysbench-1.1.0` | `PTS_TESTS` |
 
-Each build shallow-fetches the requested commit, checks it out detached, and
-verifies that HEAD matches the full hash. To deliberately update a source, edit
-its pin or supply its build argument with a full commit hash. Revalidate tool
-output and establish a new baseline when changing pins. These revisions capture
-current upstream sources, not necessarily those used by an older built image.
-APT packages and the CUDA base-image tag can still change; retain the built
-image for comparisons.
+All pins are Dockerfile build arguments. The snapshot makes every Ubuntu package
+resolve identically on each rebuild; the explicit versions make the build fail
+if the snapshot ever stops providing them. NVIDIA's CUDA apt repository is not
+snapshotted, but the build installs nothing from it. When you change a pin,
+rebuild, revalidate tool output, and treat the next run as a new baseline. If
+you change `CUDA_VERSION`, supply the matching `CUDA_IMAGE_DIGEST`.
 
-FIO is pinned to `pts/fio-1.15.0` (fio 3.29). It uses the profile's single-job
-launcher with Linux AIO, direct I/O, and `fio.buffered=0`. No job-count preset
-is supplied because this profile does not expose one.
+`PTS_TESTS` is the only place PTS versions are set. The build writes them to
+`/usr/local/share/benchmark/pts-profiles`; the runner uses base names such as
+`pts/fio`, and `pts-profile` resolves them to the pinned version. It also refuses
+to launch a profile unless every option has an explicit preset, so a profile
+change cannot silently add workloads.
 
-The image applies `benchmark-fio-latency-v1` to the installed FIO launcher using
-`fio_profile.py`. It replaces exactly one known upstream latency-disable block,
-enables latency measurement and completion percentiles 50/95/99, and fails the
-build if the expected block differs. `pts-profile` verifies this customization
-and prints the launcher SHA-256 into each FIO stage's raw log. The customization
-requires profile 1.15.0; changing that pin requires reviewing the override.
-Queue depth 64, one job, the 1 GiB test file, 20-second measured workload,
-five-second start delay, and five-second ramp remain unchanged.
+The FIO 1.15.0 launcher (fio 3.29) gets one guarded change,
+`benchmark-fio-latency-v1`: it enables completion-latency measurement and the
+50/95/99th percentiles. The build fails if the upstream block differs, and each
+FIO step logs the launcher's SHA-256. Changing the FIO pin requires reviewing
+`container/fio_profile.py`.
 
 ## 2. Verify mounts
 
-Mount the intended filesystems first. Adjust these host paths to match your setup:
+Mount the intended filesystems first, and adjust these paths to your setup:
 
 ```bash
 lsblk -o NAME,TYPE,SIZE,FSTYPE,MOUNTPOINTS
@@ -91,202 +84,135 @@ export NVME0_BENCH_PATH=/mnt/hdd/pts-bench-nvme0
 export NVME1_BENCH_PATH=/mnt/pts-bench-nvme1
 sudo mkdir -p "$NVME0_BENCH_PATH" "$NVME1_BENCH_PATH"
 
-bash ./verify-mounts
+bash scripts/verify-mounts
 ```
 
-The paths default to those shown above and map to `/mnt/bench/nvme0` and
-`/mnt/bench/nvme1` inside containers. Verification checks that they use different
-filesystem devices and are writable inside Docker. It does not prove that they
-belong to different physical drives. The runner does not invoke this check.
+The paths map to `/mnt/bench/nvme0` and `/mnt/bench/nvme1` in the containers.
+The check confirms they are on different filesystems and writable inside Docker;
+it does not prove they are different physical drives. The runner does not call it.
 
-NVMe health and self-test commands separately target `/dev/nvme0n1` and
-`/dev/nvme1n1`. If your device names differ, edit `NVME0_DEVICE` and `NVME1_DEVICE`
-in `run-playbook`. Changing the directory variables does not change these devices.
+NVMe health and self-test steps target `/dev/nvme0n1` and `/dev/nvme1n1`. If your
+device names differ, edit `NVME0_DEVICE` and `NVME1_DEVICE` in
+`src/benchsuite/playbook.py`; the directory variables do not change them.
 
 ## 3. Run
 
-In the same shell, after mount verification succeeds:
-
 ```bash
-python3 ./run-playbook
+export WORKSTATION_NAME=workstation1
+uv run run-playbook
 ```
 
-Run on the host, keeping `run-playbook`, `benchmark_capture.py`, and
-`benchmark_parsers.py` together.
-`BENCH_IMAGE` defaults to `bench:latest`.
-The rebuilt image must include the Dockerfile-generated profile manifest and
-`pts-profile` helper.
+Results go to `benchmark-results/YYYYMMDD-HHMMSS/`. To use another new or empty
+directory instead, pass it: `uv run run-playbook benchmark-results/manual-run-001`.
 
-Results default to `benchmark-results/YYYYMMDD-HHMMSS/`. To use another new or
-empty directory instead:
+| Environment variable | Default | Purpose |
+| --- | --- | --- |
+| `WORKSTATION_NAME` | the hostname, with a warning | Human-readable machine identity in the results. |
+| `BENCH_IMAGE` | `bench:latest` | Image to run. |
+| `NVME0_BENCH_PATH`, `NVME1_BENCH_PATH` | as above | Host benchmark directories. |
 
-```bash
-python3 ./run-playbook ./benchmark-results/manual-run-001
-```
+Every invocation runs the full sequence. Tool output appears after each step
+finishes. A failed or timed-out step does not stop the run; cancellation
+(Ctrl-C or SIGTERM) and runner errors do, and cancellation removes the active
+containers.
 
-Every invocation runs the full sequence; there is no resume or step selection.
-The defaults are short runs for parser capture. PTS stages use the selected profiles' supported options and default arguments. Tool
-output appears after each command finishes. Individual test failures generally
-allow later steps to run; cancellation and runner errors stop the sequence.
+### Sequence
+
+The defaults are short, for output capture and basic sanity checks rather than
+prolonged stability validation. Durations and counts are constants at the top of
+`src/benchsuite/playbook.py`; `PLAYBOOK` there defines the order. A list entry in
+`PLAYBOOK` runs its steps concurrently; every other entry runs alone.
 
 | Steps | Checks |
 | --- | --- |
-| 2a–4b | SMART health, short self-tests, and self-test logs for both NVMe devices. |
-| 5a–5b | FIO: sequential read/write at 2 MiB, then random read/write at 4 KiB, on both targets. Each stage has four configurations and two PTS runs per configuration. Latency is collected during these same runs. |
-| 6–7 | `memtester`: 2 GiB, one loop; PTS stressapptest: 2000 MB, 32 memory-copy threads, 60 seconds. |
-| 8–10 | Native CPU stress at 75% for 60 seconds, one 90-second sysbench CPU run, and one PTS run for each STREAM operation. |
-| 11a–11c | CUDA memory tests 1 (own address), 2 (moving inversions, ones and zeros), then 10 (stress): one pass each, verbosity 2; stress uses one iteration. |
-| 12 | GPU burn: 60 seconds. |
-| 13a–13f | nvbandwidth: `host_to_device_memcpy_ce`, `device_to_host_memcpy_ce`, `host_to_device_bidirectional_memcpy_ce`, `device_to_host_bidirectional_memcpy_ce`, `device_local_copy`, then `device_local_copy_sm`; 1024 MiB buffer, three samples each. |
-| 14a–14b | Native CPU stress at 100% and GPU burn together for 60 seconds. |
+| 1a–3b | NVMe SMART health, short self-test (`-s 1`), and self-test log, for each device. |
+| 4a–4b | FIO through PTS: sequential read/write at 2 MiB, then random read/write at 4 KiB, on both targets. Libaio, direct I/O, queue depth 64, one job, 1 GiB file; four configurations per step, two runs each (about 8 minutes in total). Latency comes from the same runs. |
+| 5 | `memtester` 2 GiB, one loop. |
+| 6 | stressapptest through PTS: 2000 MB, 32 memory-copy threads, 60 s. |
+| 7 | Native stress-ng on all CPUs at 75% load, 60 s. |
+| 8 | sysbench CPU through PTS, all logical CPUs, its default 90 s. |
+| 9 | STREAM through PTS: Copy, Scale, Add, Triad (100 internal iterations each). |
+| 10a–10c | cuda_memtest tests 1, 2, and 10 (stress), one pass each. |
+| 11 | gpu-burn with tensor cores, 60 s. |
+| 12a–12f | nvbandwidth: host↔device copies (each direction, then bidirectional), `device_local_copy`, `device_local_copy_sm`; 1024 MiB, three samples. |
+| 13a–13b | stress-ng at 100% and gpu-burn together, 60 s, in separate containers. |
 
-`PLAYBOOK` in `run-playbook` defines execution order and concurrency. Tuple
-entries run sequentially; a list entry runs its member tuples concurrently.
-The suite metadata and collected result order are derived from this declaration.
-Steps before 14 run sequentially. Steps 14a and 14b run in separate concurrent
-containers with separate statuses and logs. A temporary shared start barrier
-holds both workloads until their commands reach the barrier. Both workloads
-then start within the barrier's polling interval (plus OS scheduling delays).
-The barrier times out after 120 seconds if its peer never arrives. Cancellation
-attempts to stop both containers. The host output directory must support Docker
-bind mounts for this barrier.
+Steps 13a and 13b wait at a shared start barrier (`combined-start`) until both
+are ready, then start within its polling interval; the barrier gives up after
+120 seconds if its peer never arrives. The output directory must support Docker
+bind mounts for this.
 
-FIO uses `FORCE_TIMES_TO_RUN=2` to capture multi-sample statistics. All other PTS
-commands use `FORCE_TIMES_TO_RUN=1`. These explicit counts avoid dynamic extra
-runs. Native stress-ng, stressapptest, and GPU burn use `STRESS_SECONDS`
-(60 by default). Set `CPU_LOAD_PERCENT` (75) for standalone CPU stress and
-`COMBINED_CPU_LOAD_PERCENT` (100) for combined CPU/GPU stress in `run-playbook`.
-Stress-ng uses all configured CPUs and reports brief native metrics. These
-controls are also saved in the parsed metrics. Sysbench uses its CPU preset,
-all detected logical CPUs, and default 90-second duration.
-NVMe self-tests explicitly select the short test (`-s 1`), not the extended test.
-SMART and self-test log commands only read status.
+FIO uses `FORCE_TIMES_TO_RUN=2` for multi-sample statistics; other PTS steps use
+1. PTS runs with `PTS_DISPLAY_MODE=BASIC`, so the underlying tool output is kept.
+Memtester, cuda_memtest, STREAM, and NVMe self-test runtimes depend on the hardware.
 
-FIO has eight configurations and two runs each: roughly eight minutes of
-workload/startup/ramp time, before PTS overhead. Its runtime and startup timings
-come from the pinned
-1.15.0 profile (fio 3.29). STREAM is pinned to 1.3.4 to avoid the broken
-exit-status line in the 1.3.5 launcher.
-STREAM retains the profile binary's internal 100 iterations per operation even
-with one PTS run. Memtester, CUDA memory testing, STREAM, and the controller's
-short NVMe self-tests have hardware-dependent runtimes; they do not have a
-60-second wall-clock limit. These settings are for output capture and basic
-sanity checks, rather than prolonged hardware stability validation.
+### Timeouts
 
-## Capture after this update
-
-The parser supports CUDA tests 1, 2, and 10 and both newly added bandwidth
-selections, verified against the target captures. Allocation warnings are
-retained without marking otherwise completed CUDA tests as failed.
-
-The new output is in `benchmark-results/parsers-capture-001`: steps 11a, 11b,
-13d, and 13f. It covers CUDA tests 1 and 2,
-`device_to_host_bidirectional_memcpy_ce`, and `device_local_copy_sm`.
-Both bandwidth selections use the existing generic JSON parser and schema.
-
-Rebuild the image and verify the installed profile versions before the target
-run. Treat the new run as a new baseline: tool versions, FIO behavior, and the
-combined CPU/GPU contention have changed. Monitor temperatures, power, and
-throttling during combined load, and keep cooling and power settings consistent
-for later comparisons. Confirm the benchmark files land on the intended mounts.
-
-The parser recognizes missing-profile notices and PHP fatal errors as failed
-outcomes even if PTS returns zero. `execution_status` and `exit_code` retain the
-actual process result; these failures are recorded in per-test warnings.
-Sysbench selects `sysbench.run-test=cpu` without injecting a duration override.
-PTS source is left unmodified. The FIO launcher has the guarded latency
-customization described above. Rebuild the image before using the new stages;
-an older image without that customization will be rejected by the new helper.
-`pts-profile` also checks that every profile option has an explicit workload
-preset before launching PTS, so profile changes cannot silently add workloads or
-fall through to broken noninteractive prompts.
-Keep the entire output directory, including `results.json` and every compressed
-raw log, even if parsing reports issues or the runner exits with code 1. PTS
-uses `PTS_DISPLAY_MODE=BASIC` to retain underlying tool output for that work.
-Execution success and parsing completeness are separate; review actual command
-failures rather than assuming every reported issue is a parser mismatch.
+Each step has a timeout (`timeout_seconds` in the results). Steps with a set
+duration get that duration plus 600 seconds; the rest get 1800 seconds. A step
+that exceeds its timeout is stopped, its container removed, and it is recorded
+as `timed_out` with outcome `fail`; the run continues with the next step.
 
 ## Results
 
-Each run produces `results.json` and `raw/*.stdout.log.gz` / `raw/*.stderr.log.gz`.
-The JSON contains metrics, warnings, timings, image/source identities, and log
-sizes and hashes. Its format is defined by `results.schema.json` (version 9).
+Each run directory holds `results.json` and `raw/*.stdout.log.gz` /
+`raw/*.stderr.log.gz`. Keep the whole directory even when the runner reports
+issues. `results.json` follows `src/benchsuite/results.schema.json` and is
+checkpointed after every step, so an interrupted run still leaves a valid file
+(with uncompressed logs for unfinished steps).
 
-`system.host` records the host OS label from `/etc/os-release` and the host
-kernel version. `system.pts_summary` stores the first available PTS system
-summary as readable text, with its source step in `system.pts_summary_step`.
-It reuses existing test output for CPU, GPU, RAM, drive, motherboard, and BIOS
-information without extra inventory commands or dependencies. The PTS summary
-comes from inside Docker, so its operating-system label may describe the
-container; use `system.host` for the host OS/kernel.
+It records:
 
-The host record is present in the initial checkpoint. Summary fields remain
-null until PTS emits a system summary; later summaries do not overwrite it.
-Missing information does not change benchmark outcomes. Schema version 9
-replaces the detailed inventory with this compact record; existing results
-are not rewritten and historical replay uses null for unavailable metadata.
+- **Identity:** `system.workstation_name`; `system.host` (OS and kernel);
+  `system.hardware` (CPU model, logical CPUs, memory, GPUs with UUID, driver and
+  compute capability, and model/serial/firmware for each benchmarked NVMe device);
+  and `system.pts_summary`, the first PTS system summary. That summary comes from
+  inside Docker, so its OS line describes the container.
+- **Provenance:** image ID and digests, runner and parser versions, SHA-256 of
+  every runner source file, and a hash of the step list and commands.
+- **Per step:** command, timeout, timings, exit code, parsed metrics, warnings,
+  and hashes and sizes of both raw logs.
 
-- `execution_status`: command execution state.
-- `collection_status`: parsing completeness.
-- `outcome`: `pass`, `fail`, or `unknown`; no performance regression thresholds.
+Each step has three separate statuses:
 
-FIO retains PTS summaries and native per-run bandwidth/IOPS statistics and whole-run bandwidth summaries. When
-native bandwidth is available, `throughput` uses normalized MiB/s from whole-run summaries when available
-(falling back to sampled statistics), and
-`reported_throughput` preserves the PTS value and unit. Unit discrepancies
-produce warnings. Missing deviation and tool versions remain null. Shell
-syntax errors produce failed outcomes even when measurements are collected.
-Stress-ng metrics and environment notices, and CUDA allocation/timing warnings,
-are retained. Existing captures are not rewritten; the new schema applies to
-newly parsed results.
+- `execution_status`: whether the command ran (`completed`, `failed`,
+  `timed_out`, `interrupted`, `launch_failed`).
+- `collection_status`: whether parsing found everything (`complete`, `partial`,
+  `parser_error`).
+- `outcome`: `pass`, `fail`, or `unknown`. There are no performance thresholds yet.
 
-Unavailable bandwidth rows are represented by empty lists with warnings.
-Results are checkpointed during execution; interrupted collection can leave
-unfinished records and uncompressed logs. Cancellation attempts to remove the
-active container; cleanup failures are recorded in warnings and stderr.
+Execution and parsing are separate: review actual command failures rather than
+assuming every reported issue is a parser mismatch. PTS can exit zero without
+running a test, so missing-profile notices, PHP fatal errors, and shell syntax
+errors in PTS output count as failures; `exit_code` still shows the real exit code.
 
-| Exit code | Meaning |
+| Runner exit code | Meaning |
 | --- | --- |
-| `0` | All commands completed, parsed fully, and passed. |
-| `1` | Sequence finished with issues. |
-| `2` | Handled setup or runner error. |
+| `0` | Every step completed, parsed fully, and passed. |
+| `1` | The sequence finished with issues. |
+| `2` | Setup or runner error. |
 | `130` | Interrupted. |
 
-Parser version 8 corrects NVMe `valid_report_count` to exclude unused self-test
-history slots (result code 15). Latest-result outcomes are unchanged. The schema
-remains version 9, and existing captures are not rewritten.
+### Notes on metrics
 
-Schema/parser version 7 adds per-repetition FIO `completion_latency`: mean,
-maximum, and p50/p95/p99, normalized to microseconds (`unit: "us"`). Percentiles
-remain separate for each repetition and are not averaged. Historical logs parsed
-without a latency requirement retain null when no completion-latency summary
-exists; incomplete percentile sets are retained with missing keys. New stages
-require the mean, maximum, and all three percentiles; missing latency makes
-collection partial, while explicit I/O errors still produce failed outcomes.
-The parser verifies the expected workload/block-size/target combinations for
-each new stage. Original captures are not rewritten or migrated.
-Enabling timing instrumentation can affect throughput; establish a new baseline.
+- **FIO:** throughput is normalized to MiB/s from fio's native output (whole-run
+  summaries, falling back to sampled statistics). The PTS value and unit are kept
+  as `reported_throughput`, and a mismatch produces a warning.
+  `completion_latency` is per run, in microseconds: mean, max, and p50/p95/p99.
+  Enabling latency instrumentation can affect throughput.
+- **cuda_memtest:** `finished_seconds` is the tool's wall time, rounded to 0.1 s,
+  so 0.0 does not mean zero work. Test 10 also reports CUDA event times in
+  milliseconds and bandwidth. Allocation warnings are kept without failing the test.
+- **gpu-burn:** GFLOPS statistics count each work update once (arithmetic means,
+  not time-weighted); temperature and error readings include every progress line.
+- **STREAM:** a reported validation failure fails the step.
+- **nvbandwidth:** unavailable matrix rows are stored as empty lists with warnings.
 
-Schema/parser version 6 adds CUDA `test_id` and replaces the ambiguous
-`reported_elapsed_times` field with `reported_elapsed_milliseconds`. Test 10's
-`elapsedtime` is the raw CUDA event measurement in milliseconds, as defined by
-the [CUDA runtime API](https://docs.nvidia.com/cuda/cuda-runtime-api/cuda_runtime_api/group__CUDART__EVENT.html).
-`finished_seconds` separately retains the tool's wall-time completion message,
-rounded to one decimal place; 0.0 does not imply zero work. Tests 1 and 2 report
-only this wall time, so their event-time and bandwidth arrays are empty. Existing
-capture files are preserved with their original schema and parser versions.
+## Development
 
-FIO distinguishes `throughput_source` values
-`native_summary`, `native_statistics`, and `pts`; each native run also retains
-`summary_throughput` separately from sampled `throughput` statistics. STREAM
-records `solution_validated` (null when unavailable) and the native revision.
-A reported STREAM validation failure produces a failed outcome. GPU burn
-`sample_count` and GFLOPS summaries count work updates once, while
-`progress_record_count` counts all display records. Temperature and error
-readings still include repeated progress records. GFLOPS means are arithmetic
-means across work updates, not time-weighted measurements.
+```bash
+uv sync
+uv run python -m unittest discover -s tests -v
+```
 
-See [the target run review](benchmark-review-20261031.md) for findings from
-the 2026-10-31 capture. Replay and regression checks require `jsonschema`:
-`python -m unittest discover -s tests -v`. Replay checks skip when their
-original capture directories are absent.
+`tests/` is not tracked in Git yet. Version history is in [CHANGELOG.md](CHANGELOG.md).

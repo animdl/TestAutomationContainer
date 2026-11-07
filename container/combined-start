@@ -1,11 +1,12 @@
 #!/bin/sh
 set -eu
 
-# Both containers share only this per-run barrier directory. PTS invokes the CPU
-# side through TEST_EXEC_PREPEND when the actual stress-ng command is ready.
+# Start barrier for the concurrent CPU and GPU stress steps. Each container
+# marks itself ready in the shared per-run directory, waits for its peer, then
+# execs its workload, so both start within the polling interval.
 role=$1
 shift
-# PTS may include the shell's exec keyword after TEST_EXEC_PREPEND.
+# Accept a leading exec keyword for wrappers that pass one.
 if [ "${1-}" = exec ]; then
     shift
 fi
