@@ -38,6 +38,7 @@ BENCH_MOUNTS = (
 
 NVME0_DEVICE = "/dev/nvme0n1"
 NVME1_DEVICE = "/dev/nvme1n1"
+NVME_DEVICES = (NVME0_DEVICE, NVME1_DEVICE)
 FIO_GROUPS = (("4a", ("read", "write"), "2m"),
               ("4b", ("randread", "randwrite"), "4k"))
 MEMTESTER_LOOPS = 1

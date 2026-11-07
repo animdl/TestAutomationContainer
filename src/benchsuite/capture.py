@@ -1,4 +1,4 @@
-#!/usr/bin/env python3
+"""Command execution, artifact capture, host identity, and result persistence."""
 
 from __future__ import annotations
 
@@ -11,6 +11,7 @@ import re
 import shlex
 import shutil
 import signal
+import socket
 import subprocess
 import time
 from collections.abc import Iterable, Sequence
@@ -36,6 +37,96 @@ def host_system_info() -> dict[str, str | None]:
         pass
     return {"os": release.get("PRETTY_NAME") or release.get("NAME"),
             "kernel": platform.release()}
+
+
+def workstation_name() -> tuple[str, str | None]:
+    """Return the configured workstation name, falling back to the hostname."""
+    configured = os.environ.get("WORKSTATION_NAME", "").strip()
+    if configured:
+        return configured, None
+    hostname = socket.gethostname()
+    return hostname, f"WORKSTATION_NAME is not set; using hostname {hostname!r}"
+
+
+def _read_text(path: Path) -> str | None:
+    try:
+        return path.read_text(encoding="utf-8", errors="replace").strip() or None
+    except OSError:
+        return None
+
+
+def _cpu_model() -> str | None:
+    for line in (_read_text(Path("/proc/cpuinfo")) or "").splitlines():
+        key, separator, value = line.partition(":")
+        if separator and key.strip() == "model name":
+            return value.strip() or None
+    return None
+
+
+def _memory_total_kib() -> int | None:
+    match = re.search(r"(?m)^MemTotal:\s+(\d+) kB$", _read_text(Path("/proc/meminfo")) or "")
+    return int(match.group(1)) if match else None
+
+
+def _nvidia_gpus() -> tuple[list[dict[str, Any]], str | None]:
+    fields = ("index", "uuid", "name", "driver_version", "compute_cap")
+    try:
+        completed = subprocess.run(
+            ["nvidia-smi", f"--query-gpu={','.join(fields)}", "--format=csv,noheader"],
+            stdin=subprocess.DEVNULL, capture_output=True, timeout=30, check=False,
+        )
+    except (OSError, subprocess.TimeoutExpired) as exc:
+        return [], f"GPU identity unavailable: nvidia-smi failed: {type(exc).__name__}: {exc}"
+    if completed.returncode != 0:
+        error = completed.stderr.decode("utf-8", errors="replace").strip()
+        return [], f"GPU identity unavailable: nvidia-smi exited {completed.returncode}: {error or 'no output'}"
+    gpus = []
+    for line in completed.stdout.decode("utf-8", errors="replace").splitlines():
+        values = [value.strip() for value in line.split(",")]
+        if len(values) != len(fields):
+            continue
+        index, uuid, name, driver, compute = values
+        gpus.append({
+            "index": int(index) if index.isdigit() else None,
+            "uuid": uuid or None,
+            "name": name or None,
+            "driver_version": driver or None,
+            "compute_capability": compute or None,
+        })
+    return gpus, None if gpus else "GPU identity unavailable: nvidia-smi listed no GPUs"
+
+
+def _nvme_identity(device: str) -> dict[str, str | None]:
+    # /sys/block/nvme0n1/device links to the namespace's controller.
+    controller = Path("/sys/block") / Path(device).name / "device"
+    return {
+        "device": device,
+        "model": _read_text(controller / "model"),
+        "serial": _read_text(controller / "serial"),
+        "firmware": _read_text(controller / "firmware_rev"),
+    }
+
+
+def host_hardware_info(nvme_devices: Iterable[str]) -> tuple[dict[str, Any], list[str]]:
+    """Identify the host's CPU, memory, GPUs, and benchmarked NVMe drives.
+
+    Reads /proc and /sys plus one nvidia-smi query; missing values are null.
+    """
+    warnings = []
+    gpus, gpu_warning = _nvidia_gpus()
+    if gpu_warning:
+        warnings.append(gpu_warning)
+    drives = [_nvme_identity(device) for device in nvme_devices]
+    for drive in drives:
+        if drive["serial"] is None:
+            warnings.append(f"NVMe identity unavailable for {drive['device']}")
+    return {
+        "cpu_model": _cpu_model(),
+        "logical_cpus": os.cpu_count(),
+        "memory_total_kib": _memory_total_kib(),
+        "gpus": gpus,
+        "nvme": drives,
+    }, warnings
 
 
 def pts_system_summary(text: str) -> str | None:

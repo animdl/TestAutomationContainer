@@ -1,4 +1,4 @@
-#!/usr/bin/env python3
+"""Parsers that turn each tool's captured output into schema-shaped metrics."""
 
 from __future__ import annotations
 
@@ -12,7 +12,7 @@ from typing import Any
 
 logger = logging.getLogger(__name__)
 
-PARSER_VERSION = 8
+PARSER_VERSION = 9
 
 ParsedResult = dict[str, Any]
 ParserFunction = Callable[[str, str, dict[str, Any]], ParsedResult]
@@ -998,7 +998,7 @@ def parser_descriptor(spec: ParserSpec) -> dict[str, Any]:
 def parse_output(spec: ParserSpec, stdout: str, stderr: str) -> ParsedResult:
     try:
         result = spec.function(stdout, stderr, spec.options)
-        if spec.name in {'pts_fio', 'pts_stream', 'stressapptest', 'stress_ng', 'sysbench'}:
+        if spec.name in {'pts_fio', 'pts_stream', 'stressapptest', 'sysbench'}:
             # PTS can exit zero without launching a test, including PHP crashes.
             # Keep the real process exit code; distinguish these from format gaps.
             diagnostics = re.findall(
@@ -1008,7 +1008,7 @@ def parse_output(spec: ParserSpec, stdout: str, stderr: str) -> ParsedResult:
             if diagnostics:
                 result['outcome'] = 'fail'
                 result['warnings'].extend(line.strip() for line in diagnostics)
-            if spec.name in {'stressapptest', 'stress_ng', 'sysbench'} and result['metrics'] is not None:
+            if spec.name in {'stressapptest', 'sysbench'} and result['metrics'] is not None:
                 text = combined_text(stdout, stderr)
                 pts = re.search(r"Phoronix Test Suite v([^\s]+)", text)
                 profile = re.search(r"Running pinned PTS profile: (pts/[^\s]+)", text)

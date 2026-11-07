@@ -18,6 +18,7 @@ from .capture import (
     execute_command,
     execute_commands,
     inspect_image,
+    host_hardware_info,
     host_system_info,
     pts_system_summary,
     read_parser_text,
@@ -25,9 +26,10 @@ from .capture import (
     suite_hash,
     timestamp,
     utc_now,
+    workstation_name,
 )
 from .parsers import PARSER_VERSION, parse_output, parser_descriptor
-from .playbook import BENCH_MOUNTS, IMAGE, PLAYBOOK, TESTS, execution_groups
+from .playbook import BENCH_MOUNTS, IMAGE, NVME_DEVICES, PLAYBOOK, TESTS, execution_groups
 
 logger = logging.getLogger(__name__)
 
@@ -88,6 +90,8 @@ def initial_test_result(test):
 def build_initial_results(run_id, image, started_at):
     package_dir = Path(__file__).resolve().parent
     source_paths = sorted(package_dir.glob("*.py"))
+    name, name_warning = workstation_name()
+    hardware, hardware_warnings = host_hardware_info(NVME_DEVICES)
     return {
         "schema_version": SCHEMA_VERSION,
         "collector": {
@@ -98,7 +102,13 @@ def build_initial_results(run_id, image, started_at):
         },
         "run_id": run_id,
         "image": image,
-        "system": {"host": host_system_info(), "pts_summary": None, "pts_summary_step": None},
+        "system": {
+            "workstation_name": name,
+            "host": host_system_info(),
+            "hardware": hardware,
+            "pts_summary": None,
+            "pts_summary_step": None,
+        },
         "suite": {
             "command_sha256": suite_hash([(test.step, test.command) for test in TESTS]),
             "test_count": len(TESTS),
@@ -109,7 +119,7 @@ def build_initial_results(run_id, image, started_at):
         "duration_seconds": None,
         "status": "running",
         "tests": [],
-        "warnings": [],
+        "warnings": [warning for warning in (name_warning, *hardware_warnings) if warning],
         "errors": [],
     }
 

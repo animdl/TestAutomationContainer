@@ -92,8 +92,45 @@
   "$defs": {
     "system_info": {
       "type": "object", "additionalProperties": false,
-      "required": ["host", "pts_summary", "pts_summary_step"],
+      "required": ["workstation_name", "host", "hardware", "pts_summary", "pts_summary_step"],
       "properties": {
+        "workstation_name": {"type": "string", "minLength": 1},
+        "hardware": {
+          "type": "object", "additionalProperties": false,
+          "required": ["cpu_model", "logical_cpus", "memory_total_kib", "gpus", "nvme"],
+          "properties": {
+            "cpu_model": {"$ref": "#/$defs/nullable_string"},
+            "logical_cpus": {"type": ["integer", "null"], "minimum": 1},
+            "memory_total_kib": {"type": ["integer", "null"], "minimum": 0},
+            "gpus": {
+              "type": "array",
+              "items": {
+                "type": "object", "additionalProperties": false,
+                "required": ["index", "uuid", "name", "driver_version", "compute_capability"],
+                "properties": {
+                  "index": {"type": ["integer", "null"], "minimum": 0},
+                  "uuid": {"$ref": "#/$defs/nullable_string"},
+                  "name": {"$ref": "#/$defs/nullable_string"},
+                  "driver_version": {"$ref": "#/$defs/nullable_string"},
+                  "compute_capability": {"$ref": "#/$defs/nullable_string"}
+                }
+              }
+            },
+            "nvme": {
+              "type": "array",
+              "items": {
+                "type": "object", "additionalProperties": false,
+                "required": ["device", "model", "serial", "firmware"],
+                "properties": {
+                  "device": {"type": "string", "minLength": 1},
+                  "model": {"$ref": "#/$defs/nullable_string"},
+                  "serial": {"$ref": "#/$defs/nullable_string"},
+                  "firmware": {"$ref": "#/$defs/nullable_string"}
+                }
+              }
+            }
+          }
+        },
         "host": {
           "type": "object", "additionalProperties": false,
           "required": ["os", "kernel"],
@@ -449,7 +486,7 @@
       "required": [
         "kind", "passed_workers", "failed_workers", "skipped_workers",
         "metrics_untrustworthy", "completion_marker_found",
-        "phoronix_test_suite_version", "profile", "configured_cpu_load_percent", "configured_duration_seconds", "dispatched_cpu_workers", "stressor_metrics", "version"
+        "configured_cpu_load_percent", "configured_duration_seconds", "dispatched_cpu_workers", "stressor_metrics", "version"
       ],
       "properties": {
         "kind": {"const": "stress_ng"},
@@ -459,8 +496,6 @@
         "skipped_workers": {"$ref": "#/$defs/nullable_integer"},
         "metrics_untrustworthy": {"$ref": "#/$defs/nullable_integer"},
         "completion_marker_found": {"type": "boolean"},
-        "phoronix_test_suite_version": {"$ref": "#/$defs/nullable_string"},
-        "profile": {"$ref": "#/$defs/nullable_string"},
         "configured_cpu_load_percent": {"$ref": "#/$defs/nullable_integer"},
         "configured_duration_seconds": {"$ref": "#/$defs/nullable_integer"},
         "dispatched_cpu_workers": {"$ref": "#/$defs/nullable_integer"},
