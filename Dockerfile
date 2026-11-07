@@ -1,5 +1,8 @@
+# Base image: the tag is for readability; the digest is what is actually used.
+# Changing CUDA_VERSION requires supplying the matching CUDA_IMAGE_DIGEST.
 ARG CUDA_VERSION=12.6.3
-FROM nvidia/cuda:${CUDA_VERSION}-devel-ubuntu24.04
+ARG CUDA_IMAGE_DIGEST=sha256:392c0df7b577ecae17a17f6ba7f2009c217bb4422f8431c053ae9af61a8c148a
+FROM nvidia/cuda:${CUDA_VERSION}-devel-ubuntu24.04@${CUDA_IMAGE_DIGEST}
 
 ARG DEBIAN_FRONTEND=noninteractive
 ARG CUDA_ARCH=89
@@ -10,21 +13,34 @@ ARG GPU_BURN_COMMIT=0d19c94dcb2e9b6858b7586a4c327674cd67113b
 ARG NVBANDWIDTH_COMMIT=82fc4e8c6afa0babb8687793678f615b3b8d793e
 ARG CUDA_MEMTEST_COMMIT=e94e1ee54e0689c9f154a8a08202554452552ec6
 
-RUN apt-get update && \
+# Ubuntu packages come from a dated archive snapshot, so every rebuild resolves
+# the same versions. The explicit versions below are the benchmark tools and the
+# compiler that builds every source-built test; the build fails if the snapshot
+# does not provide exactly these.
+ARG UBUNTU_SNAPSHOT=20261103T000000Z
+ARG STRESS_NG_VERSION=0.17.06-1build1
+ARG MEMTESTER_VERSION=4.6.0-1
+ARG NVME_CLI_VERSION=2.8-1ubuntu0.1
+ARG GCC_VERSION=13.3.0-6ubuntu2~24.04.1
+
+RUN set -eux; \
+    printf 'APT::Snapshot "%s";\n' "${UBUNTU_SNAPSHOT}" > /etc/apt/apt.conf.d/50benchmark-snapshot; \
+    apt-get update; \
     apt-get install -y --no-install-recommends \
         php-cli php-xml php-gd php-bz2 php-sqlite3 php-curl php-zip \
         git curl wget unzip bzip2 xz-utils ca-certificates \
-        pciutils util-linux sudo \
-        build-essential gfortran cmake \
+        pciutils util-linux \
+        build-essential cmake \
+        "gcc-13=${GCC_VERSION}" "g++-13=${GCC_VERSION}" \
         autoconf automake libtool libtool-bin \
-        libaio-dev libssl-dev zlib1g-dev \
-        libmysqlclient-dev \
+        libaio-dev zlib1g-dev \
         libboost-program-options-dev \
-        libjpeg-dev mesa-utils vulkan-tools apt-file \
         pkg-config \
-        nvme-cli \
-        memtester stress-ng python3 \
-    && rm -rf /var/lib/apt/lists/*
+        "nvme-cli=${NVME_CLI_VERSION}" \
+        "memtester=${MEMTESTER_VERSION}" \
+        "stress-ng=${STRESS_NG_VERSION}" \
+        python3; \
+    rm -rf /var/lib/apt/lists/*
 
 WORKDIR /opt
 RUN set -eux; \
@@ -38,11 +54,7 @@ RUN set -eux; \
 # PTS concatenates this value directly with installed-tests/ and test-profiles/.
 ENV PTS_USER_PATH_OVERRIDE=/var/lib/phoronix-test-suite/
 
-COPY container/pts-profile /usr/local/bin/pts-profile
-COPY container/fio_profile.py /usr/local/bin/fio_profile.py
-RUN chmod +x /usr/local/bin/pts-profile
-
-# PTS may install additional packages; keep APT lists until installation ends.
+# PTS evaluates dependencies against APT; keep package lists until installation ends.
 # Force the missing integer header only for the older stressapptest source.
 RUN set -eux; \
     apt-get update; \
@@ -66,12 +78,7 @@ RUN set -eux; \
             *) phoronix-test-suite batch-install "$profile" ;; \
         esac; \
     done; \
-    python3 /usr/local/bin/fio_profile.py; \
-    pts-profile verify; \
     rm -rf /var/lib/apt/lists/*
-
-COPY container/combined-start /usr/local/bin/combined-start
-RUN chmod +x /usr/local/bin/combined-start
 
 RUN set -eux; \
     git init /opt/gpu-burn; \
@@ -101,6 +108,15 @@ RUN set -eux; \
         -DCMAKE_CUDA_ARCHITECTURES="${CUDA_ARCH}"; \
     cmake --build /opt/cuda_memtest-src/build -j "$(nproc)"; \
     install -m 0755 /opt/cuda_memtest-src/build/cuda_memtest /usr/local/bin/cuda_memtest
+
+# The repository's helpers come last so editing them does not rebuild the tools.
+# batch-install can return zero after a failed build, so verify every pinned
+# profile and apply the guarded FIO latency customization here.
+COPY container/pts-profile container/fio_profile.py container/combined-start /usr/local/bin/
+RUN set -eux; \
+    chmod +x /usr/local/bin/pts-profile /usr/local/bin/combined-start; \
+    python3 /usr/local/bin/fio_profile.py; \
+    pts-profile verify
 
 WORKDIR /root
 CMD ["/bin/bash"]
