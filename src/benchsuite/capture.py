@@ -20,8 +20,8 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, BinaryIO
 
-COLLECTOR_VERSION = 8
-SCHEMA_VERSION = 9
+COLLECTOR_VERSION = 9
+SCHEMA_VERSION = 10
 
 
 def host_system_info() -> dict[str, str | None]:
@@ -157,11 +157,16 @@ def remove_container(container_name: str) -> str | None:
     return None
 
 
+def timeout_diagnostic(timeout_seconds: float) -> bytes:
+    return f"runner timeout: command exceeded {timeout_seconds} seconds and was stopped\n".encode()
+
+
 def execute_command(
     command: list[str],
     stdout_path: Path,
     stderr_path: Path,
     container_name: str | None = None,
+    timeout_seconds: float | None = None,
 ) -> ExecutionResult:
     started = utc_now()
     monotonic_started = time.monotonic()
@@ -178,9 +183,19 @@ def execute_command(
                 stdout=stdout_handle,
                 stderr=stderr_handle,
                 check=False,
+                timeout=timeout_seconds,
             )
             exit_code = completed.returncode
             status = "completed" if exit_code == 0 else "failed"
+        except subprocess.TimeoutExpired:
+            # run() has killed the Docker client; the container keeps running
+            # until it is removed explicitly.
+            status = "timed_out"
+            stderr_handle.write(timeout_diagnostic(timeout_seconds))
+            if container_name:
+                cleanup_error = remove_container(container_name)
+                if cleanup_error:
+                    stderr_handle.write(f"runner cleanup error: {cleanup_error}\n".encode())
         except KeyboardInterrupt:
             status = "interrupted"
             if container_name:
@@ -206,20 +221,25 @@ def execute_command(
 
 
 def execute_commands(
-    jobs: Sequence[tuple[list[str], Path, Path, str | None]],
+    jobs: Sequence[tuple[list[str], Path, Path, str | None, float | None]],
 ) -> list[ExecutionResult]:
-    """Launch a group before waiting; retain separate logs and clean up all jobs."""
+    """Launch a group before waiting; retain separate logs and clean up all jobs.
+
+    Each job is (command, stdout_path, stderr_path, container_name, timeout_seconds).
+    A job that exceeds its timeout is stopped on its own; the others keep running.
+    """
     records = [ExecutionResult(timestamp(), "", 0, None, "launch_failed") for _ in jobs]
     processes: list[subprocess.Popen[bytes] | None] = [None] * len(jobs)
+    stderr_handles: list[BinaryIO | None] = [None] * len(jobs)
     starts = [time.monotonic()] * len(jobs)
     with ExitStack() as files:
         try:
-            for i, (command, stdout_path, stderr_path, _) in enumerate(jobs):
+            for i, (command, stdout_path, stderr_path, _, _) in enumerate(jobs):
                 starts[i] = time.monotonic()
                 record = records[i]
                 record.started_at = timestamp()
                 stdout = files.enter_context(stdout_path.open("wb"))
-                stderr = files.enter_context(stderr_path.open("wb"))
+                stderr = stderr_handles[i] = files.enter_context(stderr_path.open("wb"))
                 try:
                     processes[i] = subprocess.Popen(
                         command, stdin=subprocess.DEVNULL, stdout=stdout, stderr=stderr,
@@ -234,8 +254,19 @@ def execute_commands(
             while pending:
                 for i, process in list(pending.items()):
                     code = process.poll()
-                    if code is not None:
-                        record = records[i]
+                    record = records[i]
+                    timeout = jobs[i][4]
+                    if code is None and timeout is not None and time.monotonic() - starts[i] > timeout:
+                        process.kill()
+                        process.wait(timeout=30)
+                        record.execution_status = "timed_out"
+                        record.finished_at = timestamp()
+                        record.duration_seconds = round(time.monotonic() - starts[i], 6)
+                        stderr_handles[i].write(timeout_diagnostic(timeout))
+                        if jobs[i][3]:
+                            record.cleanup_error = remove_container(jobs[i][3])
+                        del pending[i]
+                    elif code is not None:
                         record.exit_code = code
                         record.execution_status = "completed" if code == 0 else "failed"
                         record.finished_at = timestamp()

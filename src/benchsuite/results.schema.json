@@ -1,6 +1,6 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
-  "$id": "https://example.invalid/workstation-benchmark-results-v9.schema.json",
+  "$id": "https://example.invalid/workstation-benchmark-results-v10.schema.json",
   "title": "Workstation benchmark results",
   "type": "object",
   "additionalProperties": false,
@@ -20,7 +20,7 @@
     "errors"
   ],
   "properties": {
-    "schema_version": {"const": 9},
+    "schema_version": {"const": 10},
     "collector": {
       "type": "object",
       "additionalProperties": false,
@@ -173,6 +173,7 @@
       "required": [
         "step",
         "command",
+        "timeout_seconds",
         "started_at",
         "finished_at",
         "duration_seconds",
@@ -188,6 +189,7 @@
       "properties": {
         "step": {"type": "string", "minLength": 1},
         "command": {"type": "string", "minLength": 1},
+        "timeout_seconds": {"type": "number", "exclusiveMinimum": 0},
         "started_at": {
           "oneOf": [
             {"$ref": "#/$defs/timestamp"},
@@ -209,7 +211,8 @@
             "completed",
             "failed",
             "interrupted",
-            "launch_failed"
+            "launch_failed",
+            "timed_out"
           ]
         },
         "collection_status": {

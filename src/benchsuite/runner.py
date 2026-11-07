@@ -1,7 +1,6 @@
-#!/usr/bin/env python3
+"""Run the benchmark playbook in Docker and record parsed results."""
 
 import logging
-import os
 import signal
 import sys
 import tempfile
@@ -27,178 +26,10 @@ from .capture import (
     timestamp,
     utc_now,
 )
-from .parsers import (
-    PARSER_VERSION,
-    ParserSpec,
-    parse_cuda_memtest,
-    parse_gpu_burn,
-    parse_memtester,
-    parse_nvbandwidth,
-    parse_nvme_device_self_test,
-    parse_nvme_self_test_log,
-    parse_nvme_smart,
-    parse_output,
-    parse_pts_fio,
-    parse_pts_stream,
-    parse_stress_ng,
-    parse_stressapptest,
-    parse_sysbench,
-    parser_descriptor,
-)
+from .parsers import PARSER_VERSION, parse_output, parser_descriptor
+from .playbook import BENCH_MOUNTS, IMAGE, PLAYBOOK, TESTS, execution_groups
 
 logger = logging.getLogger(__name__)
-
-IMAGE = os.environ.get("BENCH_IMAGE", "bench:latest")
-BENCH_MOUNTS = (
-    (
-        os.environ.get("NVME0_BENCH_PATH", "/mnt/hdd/pts-bench-nvme0"),
-        "/mnt/bench/nvme0",
-    ),
-    (
-        os.environ.get("NVME1_BENCH_PATH", "/mnt/pts-bench-nvme1"),
-        "/mnt/bench/nvme1",
-    ),
-)
-
-NVME0_DEVICE = "/dev/nvme0n1"
-NVME1_DEVICE = "/dev/nvme1n1"
-FIO_GROUPS = (("5a", ("read", "write"), "2m"),
-              ("5b", ("randread", "randwrite"), "4k"))
-MEMTESTER_LOOPS = 1
-CUDA_MEMTEST_PASSES = 1
-STRESS_SECONDS = 60
-CPU_LOAD_PERCENT = 75
-COMBINED_CPU_LOAD_PERCENT = 100
-NVBANDWIDTH_SAMPLES = 3
-STREAM_OPERATIONS = ("Copy", "Scale", "Add", "Triad")
-
-def fio_options(workloads, block_size):
-    return (
-        f"fio.type={','.join(workloads)};"
-        "fio.engine=libaio;"
-        "fio.buffered=0;"
-        "fio.direct=1;"
-        f"fio.size={block_size};"
-        f"fio.auto-disk-mount-points={','.join(target for _, target in BENCH_MOUNTS)}"
-    )
-
-STREAM_OPTIONS = f"stream.run-type={','.join(STREAM_OPERATIONS)}"
-
-
-def pts_command(profile, options, runs=1):
-    return (
-        f"env PTS_DISPLAY_MODE=BASIC FORCE_TIMES_TO_RUN={runs} PRESET_OPTIONS_VALUES='{options}' "
-        f"pts-profile run {profile}"
-    )
-
-
-def cpu_stress_command(load, combined=False):
-    command = (
-        f"stress-ng --cpu 0 --cpu-load {load} --timeout {STRESS_SECONDS} "
-        "--metrics-brief"
-    )
-    if combined:
-        command = "/usr/local/bin/combined-start cpu " + command
-    return "stress-ng --version && " + command
-
-# Execution order lives here. A list entry groups concurrent workloads;
-# every tuple entry runs alone. Profile versions live only in Dockerfile.
-PLAYBOOK = [
-    (
-        "2a", f"nvme smart-log {NVME0_DEVICE} -o json",
-        ParserSpec("nvme_smart", parse_nvme_smart, {"device": NVME0_DEVICE}),
-    ),
-    (
-        "2b", f"nvme smart-log {NVME1_DEVICE} -o json",
-        ParserSpec("nvme_smart", parse_nvme_smart, {"device": NVME1_DEVICE}),
-    ),
-    (
-        "3a", f"nvme device-self-test {NVME0_DEVICE} -s 1 -w",
-        ParserSpec("nvme_device_self_test", parse_nvme_device_self_test, {"device": NVME0_DEVICE}),
-    ),
-    (
-        "3b", f"nvme device-self-test {NVME1_DEVICE} -s 1 -w",
-        ParserSpec("nvme_device_self_test", parse_nvme_device_self_test, {"device": NVME1_DEVICE}),
-    ),
-    (
-        "4a", f"nvme self-test-log {NVME0_DEVICE} -o json",
-        ParserSpec("nvme_self_test_log", parse_nvme_self_test_log, {"device": NVME0_DEVICE}),
-    ),
-    (
-        "4b", f"nvme self-test-log {NVME1_DEVICE} -o json",
-        ParserSpec("nvme_self_test_log", parse_nvme_self_test_log, {"device": NVME1_DEVICE}),
-    ),
-    *[(step, pts_command("pts/fio", fio_options(workloads, block_size), runs=2),
-        ParserSpec("pts_fio", parse_pts_fio, {
-            "expected_configurations": len(workloads) * len(BENCH_MOUNTS),
-            "expected_samples": 2,
-            "require_latency": True,
-            "expected_workloads": workloads,
-            "expected_block_size": block_size,
-            "expected_targets": [target for _, target in BENCH_MOUNTS],
-        })) for step, workloads, block_size in FIO_GROUPS],
-    (
-        "6", f"memtester 2G {MEMTESTER_LOOPS}",
-        ParserSpec("memtester", parse_memtester, {"expected_loops": MEMTESTER_LOOPS}),
-    ),
-    (
-        "7", pts_command("pts/stressapptest",
-                         "stressapptest.cpu-threads=32;stressapptest.ram-capacity=2000;"
-                         f"stressapptest.duration={STRESS_SECONDS}"),
-        ParserSpec("stressapptest", parse_stressapptest),
-    ),
-    ("8", cpu_stress_command(CPU_LOAD_PERCENT), ParserSpec("stress_ng", parse_stress_ng, {
-        "cpu_load_percent": CPU_LOAD_PERCENT, "duration_seconds": STRESS_SECONDS,
-    })),
-    (
-        "9", pts_command("pts/sysbench", "sysbench.run-test=cpu"),
-        ParserSpec("sysbench", parse_sysbench),
-    ),
-    (
-        "10",
-        pts_command("pts/stream", STREAM_OPTIONS),
-        ParserSpec("pts_stream", parse_pts_stream, {"expected_operations": STREAM_OPERATIONS}),
-    ),
-    (
-        "11a", f"cuda_memtest --disable_all --enable_test 1 --num_passes {CUDA_MEMTEST_PASSES} --verbose 2",
-        ParserSpec("cuda_memtest", parse_cuda_memtest, {"test_id": 1, "expected_passes": CUDA_MEMTEST_PASSES}),
-    ),
-    (
-        "11b", f"cuda_memtest --disable_all --enable_test 2 --num_passes {CUDA_MEMTEST_PASSES} --verbose 2",
-        ParserSpec("cuda_memtest", parse_cuda_memtest, {"test_id": 2, "expected_passes": CUDA_MEMTEST_PASSES}),
-    ),
-    (
-        "11c", f"cuda_memtest --stress --num_iterations 1 --num_passes {CUDA_MEMTEST_PASSES} --verbose 2",
-        ParserSpec("cuda_memtest", parse_cuda_memtest, {"test_id": 10, "expected_passes": CUDA_MEMTEST_PASSES}),
-    ),
-    ("12", f"gpu-burn -tc {STRESS_SECONDS}", ParserSpec("gpu_burn", parse_gpu_burn)),
-    ("13a", f"nvbandwidth -t host_to_device_memcpy_ce -b 1024 -i {NVBANDWIDTH_SAMPLES} -j", ParserSpec("nvbandwidth", parse_nvbandwidth)),
-    ("13b", f"nvbandwidth -t device_to_host_memcpy_ce -b 1024 -i {NVBANDWIDTH_SAMPLES} -j", ParserSpec("nvbandwidth", parse_nvbandwidth)),
-    (
-        "13c", f"nvbandwidth -t host_to_device_bidirectional_memcpy_ce -b 1024 -i {NVBANDWIDTH_SAMPLES} -j",
-        ParserSpec("nvbandwidth", parse_nvbandwidth),
-    ),
-    (
-        "13d", f"nvbandwidth -t device_to_host_bidirectional_memcpy_ce -b 1024 -i {NVBANDWIDTH_SAMPLES} -j",
-        ParserSpec("nvbandwidth", parse_nvbandwidth),
-    ),
-    ("13e", f"nvbandwidth -t device_local_copy -b 1024 -i {NVBANDWIDTH_SAMPLES} -j", ParserSpec("nvbandwidth", parse_nvbandwidth)),
-    ("13f", f"nvbandwidth -t device_local_copy_sm -b 1024 -i {NVBANDWIDTH_SAMPLES} -j", ParserSpec("nvbandwidth", parse_nvbandwidth)),
-    [
-        ("14a", cpu_stress_command(COMBINED_CPU_LOAD_PERCENT, combined=True),
-         ParserSpec("stress_ng", parse_stress_ng, {
-             "cpu_load_percent": COMBINED_CPU_LOAD_PERCENT, "duration_seconds": STRESS_SECONDS,
-         })),
-        ("14b", f"/usr/local/bin/combined-start gpu gpu-burn -tc {STRESS_SECONDS}", ParserSpec("gpu_burn", parse_gpu_burn)),
-    ],
-]
-
-
-def execution_groups(playbook):
-    return [entry if isinstance(entry, list) else [entry] for entry in playbook]
-
-
-TESTS = [test for group in execution_groups(PLAYBOOK) for test in group]
 
 
 def docker_command(command, container_name=None, sync_dir=None):
@@ -234,11 +65,12 @@ def prepare_output_directory(path):
     (path / "raw").mkdir()
 
 
-def initial_test_result(step, command, parser):
+def initial_test_result(test):
     """Start the checkpoint record; execution supplies precise timings later."""
     return {
-        "step": step,
-        "command": command,
+        "step": test.step,
+        "command": test.command,
+        "timeout_seconds": test.timeout_seconds,
         "started_at": timestamp(),
         "finished_at": None,
         "duration_seconds": None,
@@ -246,7 +78,7 @@ def initial_test_result(step, command, parser):
         "execution_status": "running",
         "collection_status": "pending",
         "outcome": "unknown",
-        "parser": parser_descriptor(parser),
+        "parser": parser_descriptor(test.parser),
         "metrics": None,
         "warnings": [],
         "artifacts": {},
@@ -268,9 +100,9 @@ def build_initial_results(run_id, image, started_at):
         "image": image,
         "system": {"host": host_system_info(), "pts_summary": None, "pts_summary_step": None},
         "suite": {
-            "command_sha256": suite_hash([(step, command) for step, command, _ in TESTS]),
+            "command_sha256": suite_hash([(test.step, test.command) for test in TESTS]),
             "test_count": len(TESTS),
-            "steps": [step for step, _, _ in TESTS],
+            "steps": [test.step for test in TESTS],
         },
         "started_at": timestamp(started_at),
         "finished_at": None,
@@ -281,22 +113,23 @@ def build_initial_results(run_id, image, started_at):
         "errors": [],
     }
 
-def prepare_step(step, command, parser, output_dir, results):
+
+def prepare_step(test, output_dir, results):
     """Checkpoint before launch, including every member of a concurrent group."""
     output_file = output_dir / "results.json"
-    print(f"\n[{step}] {command}", flush=True)
-    test_result = initial_test_result(step, command, parser)
+    print(f"\n[{test.step}] {test.command}", flush=True)
+    test_result = initial_test_result(test)
     results["tests"].append(test_result)
     atomic_save(output_file, results)
 
-    prefix = artifact_prefix(step)
+    prefix = artifact_prefix(test.step)
     stdout_path = output_dir / "raw" / f"{prefix}.stdout.log"
     stderr_path = output_dir / "raw" / f"{prefix}.stderr.log"
     container_name = f"benchmark-{uuid.uuid4().hex}"
     return test_result, stdout_path, stderr_path, container_name
 
 
-def collect_step(step, parser, output_dir, results, prepared, execution):
+def collect_step(test, output_dir, results, prepared, execution):
     test_result, stdout_path, stderr_path, _ = prepared
     output_file = output_dir / "results.json"
 
@@ -306,20 +139,23 @@ def collect_step(step, parser, output_dir, results, prepared, execution):
     if stderr:
         print(stderr, end="", file=sys.stderr, flush=True)
 
-    if results["system"]["pts_summary"] is None and parser.name in (
+    if results["system"]["pts_summary"] is None and test.parser.name in (
         "pts_fio", "pts_stream", "stressapptest", "sysbench",
     ):
         summary = pts_system_summary(stdout)
         if summary:
             results["system"]["pts_summary"] = summary
-            results["system"]["pts_summary_step"] = step
+            results["system"]["pts_summary_step"] = test.step
 
-    parsed = parse_output(parser, stdout, stderr)
+    parsed = parse_output(test.parser, stdout, stderr)
     warnings = list(parsed["warnings"])
     outcome = parsed["outcome"]
     if execution.execution_status == "failed":
         outcome = "fail"
         warnings.append(f"command exited with code {execution.exit_code}")
+    elif execution.execution_status == "timed_out":
+        outcome = "fail"
+        warnings.append(f"command timed out after {test.timeout_seconds} seconds and was stopped")
     elif execution.execution_status != "completed":
         outcome = "unknown"
         warnings.append(
@@ -352,7 +188,7 @@ def collect_step(step, parser, output_dir, results, prepared, execution):
     )
     atomic_save(output_file, results)
     print(
-        f"[{step}] execution={execution.execution_status} "
+        f"[{test.step}] execution={execution.execution_status} "
         f"collection={test_result['collection_status']} "
         f"outcome={test_result['outcome']} "
         f"duration={execution.duration_seconds:.3f}s",
@@ -362,27 +198,24 @@ def collect_step(step, parser, output_dir, results, prepared, execution):
 
 
 def run_steps(tests, output_dir, results):
-    prepared = [
-        prepare_step(step, command, parser, output_dir, results)
-        for step, command, parser in tests
-    ]
-    jobs = [
-        (docker_command(command, item[3]), item[1], item[2], item[3])
-        for (_, command, _), item in zip(tests, prepared)
-    ]
-    if len(jobs) == 1:
-        command, stdout, stderr, name = jobs[0]
-        executions = [execute_command(command, stdout, stderr, container_name=name)]
+    prepared = [prepare_step(test, output_dir, results) for test in tests]
+    if len(tests) == 1:
+        (test,), (item,) = tests, prepared
+        executions = [execute_command(
+            docker_command(test.command, item[3]), item[1], item[2],
+            container_name=item[3], timeout_seconds=test.timeout_seconds,
+        )]
     else:
         with tempfile.TemporaryDirectory(prefix=".combined-", dir=output_dir.resolve()) as sync_dir:
             jobs = [
-                (docker_command(command, item[3], sync_dir), item[1], item[2], item[3])
-                for (_, command, _), item in zip(tests, prepared)
+                (docker_command(test.command, item[3], sync_dir), item[1], item[2], item[3],
+                 test.timeout_seconds)
+                for test, item in zip(tests, prepared)
             ]
             executions = execute_commands(jobs)
     interrupted = False
-    for (step, _, parser), item, execution in zip(tests, prepared, executions):
-        interrupted |= collect_step(step, parser, output_dir, results, item, execution)
+    for test, item, execution in zip(tests, prepared, executions):
+        interrupted |= collect_step(test, output_dir, results, item, execution)
     return interrupted
 
 
@@ -450,6 +283,7 @@ def main():
     if results["status"] == "interrupted":
         return 130
     return 1 if results["status"] == "completed_with_issues" else 2
+
 
 if __name__ == "__main__":
     raise SystemExit(main())
