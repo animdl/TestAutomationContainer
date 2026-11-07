@@ -10,7 +10,7 @@ import uuid
 from datetime import datetime
 from pathlib import Path
 
-from benchmark_capture import (
+from .capture import (
     COLLECTOR_VERSION,
     SCHEMA_VERSION,
     artifact_prefix,
@@ -27,7 +27,7 @@ from benchmark_capture import (
     timestamp,
     utc_now,
 )
-from benchmark_parsers import (
+from .parsers import (
     PARSER_VERSION,
     ParserSpec,
     parse_cuda_memtest,
@@ -254,12 +254,8 @@ def initial_test_result(step, command, parser):
 
 
 def build_initial_results(run_id, image, started_at):
-    script_dir = Path(__file__).resolve().parent
-    source_paths = [
-        Path(__file__).resolve(),
-        script_dir / "benchmark_capture.py",
-        script_dir / "benchmark_parsers.py",
-    ]
+    package_dir = Path(__file__).resolve().parent
+    source_paths = sorted(package_dir.glob("*.py"))
     return {
         "schema_version": SCHEMA_VERSION,
         "collector": {

@@ -1,0 +1,21 @@
+[project]
+name = "benchsuite"
+version = "0.1.0"
+description = "Benchmark and stress-test runner for edge machine-vision workstations"
+readme = "README.md"
+requires-python = ">=3.12,<3.13"
+# The host runner uses only the standard library.
+dependencies = []
+
+[project.scripts]
+run-playbook = "benchsuite.runner:main"
+
+[dependency-groups]
+dev = ["jsonschema>=4,<5"]
+
+[build-system]
+requires = ["uv_build>=0.13.7,<0.14"]
+build-backend = "uv_build"
+
+[tool.uv]
+required-version = ">=0.13.7"

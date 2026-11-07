@@ -1,4 +1,4 @@
 benchmark-results/
 tests/
-requirements-dev.txt
 __pycache__/
+.venv/

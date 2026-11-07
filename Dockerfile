@@ -38,8 +38,8 @@ RUN set -eux; \
 # PTS concatenates this value directly with installed-tests/ and test-profiles/.
 ENV PTS_USER_PATH_OVERRIDE=/var/lib/phoronix-test-suite/
 
-COPY pts-profile /usr/local/bin/pts-profile
-COPY fio_profile.py /usr/local/bin/fio_profile.py
+COPY container/pts-profile /usr/local/bin/pts-profile
+COPY container/fio_profile.py /usr/local/bin/fio_profile.py
 RUN chmod +x /usr/local/bin/pts-profile
 
 # PTS may install additional packages; keep APT lists until installation ends.
@@ -70,7 +70,7 @@ RUN set -eux; \
     pts-profile verify; \
     rm -rf /var/lib/apt/lists/*
 
-COPY combined-start /usr/local/bin/combined-start
+COPY container/combined-start /usr/local/bin/combined-start
 RUN chmod +x /usr/local/bin/combined-start
 
 RUN set -eux; \
