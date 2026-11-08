@@ -205,15 +205,16 @@ errors in PTS output count as failures; `exit_code` still shows the real exit co
 ### Notes on metrics
 
 - **FIO:** throughput is normalized to MiB/s from fio's native output (whole-run
-  summaries, falling back to sampled statistics). The PTS value and unit are kept
-  as `reported_throughput`, and a mismatch produces a warning.
+  summaries, falling back to sampled statistics). The PTS value is kept as
+  `reported_throughput`, and a mismatch produces a warning. `pts/fio-1.15.0`
+  labels fio's MiB/s figure as MB/s, so the parser records that label as MiB/s.
   `completion_latency` is per run, in microseconds: mean, max, and p50/p95/p99.
   Enabling latency instrumentation can affect throughput.
 - **cuda_memtest:** `finished_seconds` is the tool's wall time, rounded to 0.1 s,
   so 0.0 does not mean zero work. Test 10 also reports CUDA event times in
   milliseconds and bandwidth. The tool computes that bandwidth as
-  (2 × iterations + 1) × allocated MiB / elapsed ms and labels it GB/s; one MiB/ms is 1.049 GB/s, so the figure
-  is about 5% below true GB/s. Allocation warnings, where the largest possible
+  (2 × iterations + 1) × allocated MiB / elapsed ms and labels it GB/s; the
+  parser converts it to true GB/s (1 MiB/ms = 1.048576 GB/s). Allocation warnings, where the largest possible
   allocation is slightly smaller than reported free memory, are kept without
   failing the test.
 - **gpu-burn:** a forced kill of workers that ignored SIGTERM is recorded as a

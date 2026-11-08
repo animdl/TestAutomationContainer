@@ -4,9 +4,17 @@ Versions are the results schema, collector, and parser versions recorded in each
 `results.json`. They will be reset before the production release. Existing
 captures are never rewritten; each keeps the versions it was produced with.
 
-## Unreleased: first target-run fixes (schema 10, collector 9, parser 10)
+## Unreleased: first target-run fixes (schema 10, collector 9, parser 11)
 
 Treat the next run as a new baseline for steps 10c, 11, and 13b.
+
+- Parser 11: unit labels.
+  - FIO: `pts/fio-1.15.0` reports fio's MiB/s figure labelled MB/s, which raised a
+    false "PTS throughput differs" warning for every configuration (8 per run).
+    `reported_throughput` is now labelled MiB/s for that profile; real
+    disagreements still warn. Normalized `throughput` values are unchanged.
+  - cuda_memtest test 10: the tool's "GB/s" is MiB/ms. `bandwidth_gb_per_second`
+    is now true GB/s (× 1.048576).
 
 - cuda_memtest test 10 (step 10c) now covers the whole allocation. The upstream
   kernels truncated the size to 32 bits, so the first target run (RTX 4080,

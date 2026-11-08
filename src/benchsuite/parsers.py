@@ -12,7 +12,8 @@ from typing import Any
 
 logger = logging.getLogger(__name__)
 
-PARSER_VERSION = 10
+PARSER_VERSION = 11
+CUDA_MEMTEST_MIB_PER_MS_TO_GB_PER_S = 1048576 * 1000 / 1e9
 
 ParsedResult = dict[str, Any]
 ParserFunction = Callable[[str, str, dict[str, Any]], ParsedResult]
@@ -370,6 +371,12 @@ def parse_pts_fio(
         if item[field] is not None:
             warnings.append(f"duplicate {field} result for {match.group('label')}")
         item[field] = _pts_measurement(match)
+        # pts/fio-1.15.0 reports fio's first bandwidth figure ("BW=1708MiB/s
+        # (1790MB/s)" -> 1708) but labels it MB/s. Correct the label so the
+        # comparison below only flags real disagreements.
+        if (field == "reported_throughput" and versions["profile"] == "pts/fio-1.15.0"
+                and item[field]["unit"] == "MB/s"):
+            item[field]["unit"] = "MiB/s"
 
     # BASIC mode includes native output. Its explicit units take precedence over
     # PTS's known incorrect bandwidth labels, while the PTS summary is preserved.
@@ -784,6 +791,8 @@ def parse_cuda_memtest(
     ]
     allocated = re.findall(r"Allocated\s+(\d+) MB", text)
     # Test 10 prints cudaEventElapsedTime's result directly, in milliseconds.
+    # Its "GB/s" is (2 * iterations + 1) * allocated MiB / elapsed ms, i.e. units
+    # of MiB/ms; convert to true GB/s (1 MiB/ms = 1.048576 GB/s).
     pass_reports = re.findall(
         r"test10: elapsedtime=([\d.]+), bandwidth=([\d.]+) GB/s", text
     ) if test_id == 10 else []
@@ -815,7 +824,9 @@ def parse_cuda_memtest(
         "completed_passes": len(finished_seconds),
         "finished_seconds": finished_seconds,
         "reported_elapsed_milliseconds": [float(value[0]) for value in pass_reports],
-        "bandwidth_gb_per_second": [float(value[1]) for value in pass_reports],
+        "bandwidth_gb_per_second": [
+            round(float(value[1]) * CUDA_MEMTEST_MIB_PER_MS_TO_GB_PER_S, 6) for value in pass_reports
+        ],
         "reported_error_counts": error_counts,
         "maximum_reported_errors": maximum_errors,
         "completion_marker_found": exited,
