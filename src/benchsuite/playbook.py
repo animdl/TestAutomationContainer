@@ -44,6 +44,9 @@ FIO_GROUPS = (("4a", ("read", "write"), "2m"),
 MEMTESTER_LOOPS = 1
 CUDA_MEMTEST_PASSES = 1
 STRESS_SECONDS = 60
+# gpu-burn always sleeps this long after its SIGTERM before checking whether the
+# workers exited (upstream default 30), then SIGKILLs any that remain.
+GPU_BURN_SIGTERM_SECONDS = 5
 CPU_LOAD_PERCENT = 75
 COMBINED_CPU_LOAD_PERCENT = 100
 NVBANDWIDTH_SAMPLES = 3
@@ -93,6 +96,12 @@ def cpu_stress_command(load, combined=False):
     if combined:
         command = "/usr/local/bin/combined-start cpu " + command
     return "stress-ng --version && " + command
+
+
+def gpu_burn_command():
+    # -stts must precede the duration: gpu-burn reads the run length from the
+    # first argument after the options it counted.
+    return f"gpu-burn -tc -stts {GPU_BURN_SIGTERM_SECONDS} {STRESS_SECONDS}"
 
 
 def nvbandwidth_step(step, testcase):
@@ -145,7 +154,7 @@ PLAYBOOK = [
          ParserSpec("cuda_memtest", parse_cuda_memtest, {"test_id": 2, "expected_passes": CUDA_MEMTEST_PASSES})),
     Step("10c", f"cuda_memtest --stress --num_iterations 1 --num_passes {CUDA_MEMTEST_PASSES} --verbose 2",
          ParserSpec("cuda_memtest", parse_cuda_memtest, {"test_id": 10, "expected_passes": CUDA_MEMTEST_PASSES})),
-    Step("11", f"gpu-burn -tc {STRESS_SECONDS}",
+    Step("11", gpu_burn_command(),
          ParserSpec("gpu_burn", parse_gpu_burn), STRESS_TIMEOUT_SECONDS),
     nvbandwidth_step("12a", "host_to_device_memcpy_ce"),
     nvbandwidth_step("12b", "device_to_host_memcpy_ce"),
@@ -158,7 +167,7 @@ PLAYBOOK = [
              ParserSpec("stress_ng", parse_stress_ng, {
                  "cpu_load_percent": COMBINED_CPU_LOAD_PERCENT, "duration_seconds": STRESS_SECONDS,
              }), STRESS_TIMEOUT_SECONDS),
-        Step("13b", f"/usr/local/bin/combined-start gpu gpu-burn -tc {STRESS_SECONDS}",
+        Step("13b", f"/usr/local/bin/combined-start gpu {gpu_burn_command()}",
              ParserSpec("gpu_burn", parse_gpu_burn), STRESS_TIMEOUT_SECONDS),
     ],
 ]

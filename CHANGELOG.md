@@ -4,7 +4,20 @@ Versions are the results schema, collector, and parser versions recorded in each
 `results.json`. They will be reset before the production release. Existing
 captures are never rewritten; each keeps the versions it was produced with.
 
-## Unreleased: Phase 1 cleanup (schema 10, collector 9, parser 9)
+## Unreleased: first target-run fixes (schema 10, collector 9, parser 10)
+
+Treat the next run as a new baseline for steps 10c, 11, and 13b.
+
+- cuda_memtest test 10 (step 10c) now covers the whole allocation. The upstream
+  kernels truncated the size to 32 bits, so the first target run (RTX 4080,
+  15,124 MiB allocated) stressed only 2,836 MiB and reported an impossible
+  2,778 GB/s. The guarded build-time patch `benchmark-cuda-memtest-test10-size-v1`
+  widens the size and per-block offset. Tests 1 and 2 were not affected.
+- gpu-burn (steps 11 and 13b) runs with `-stts 5`. It always slept its full
+  SIGTERM threshold (default 30 s) after the burn, so a 60 s burn took about 92 s.
+- Parser 10: a gpu-burn SIGKILL fallback is recorded as a warning.
+
+## Phase 1 cleanup (schema 10, collector 9, parser 9)
 
 Treat the first run after this change as a new baseline: the compiler, package
 set, and step ids changed.

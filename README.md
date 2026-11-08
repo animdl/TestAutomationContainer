@@ -26,7 +26,7 @@ Run everything in Bash on the Linux workstation, from the repository root.
 | Path | Runs on | Contents |
 | --- | --- | --- |
 | `Dockerfile` | build | The pinned image. Its build context is only `container/`. |
-| `container/` | in the image | `pts-profile` (pinned PTS launcher), `fio_profile.py` (FIO latency customization), `combined-start` (CPU/GPU start barrier). |
+| `container/` | in the image | `pts-profile` (pinned PTS launcher), `fio_profile.py` (FIO latency customization), `cuda_memtest_patch.py` (test 10 size fix, applied at build), `combined-start` (CPU/GPU start barrier). |
 | `src/benchsuite/` | host | `playbook.py` (suite definition), `runner.py`, `capture.py`, `parsers.py`, `results.schema.json`. |
 | `scripts/` | host | `verify-mounts`. |
 
@@ -72,6 +72,15 @@ The FIO 1.15.0 launcher (fio 3.29) gets one guarded change,
 50/95/99th percentiles. The build fails if the upstream block differs, and each
 FIO step logs the launcher's SHA-256. Changing the FIO pin requires reviewing
 `container/fio_profile.py`.
+
+cuda_memtest gets one guarded source change before it is compiled,
+`benchmark-cuda-memtest-test10-size-v1`. Upstream, the test 10 (stress) kernels
+take the allocation size as a 32-bit `int`, so an allocation of 2 GiB or more is
+truncated modulo 2^32 (on a 16 GB card, 2,836 of 15,124 MiB were tested) while
+the reported bandwidth still counts the whole allocation. The patch widens the
+size and the per-block offset to `unsigned long`, and the build fails if the
+upstream source differs. Changing `CUDA_MEMTEST_COMMIT` requires reviewing
+`container/cuda_memtest_patch.py`.
 
 ## 2. Verify mounts
 
@@ -133,7 +142,7 @@ prolonged stability validation. Durations and counts are constants at the top of
 | 8 | sysbench CPU through PTS, all logical CPUs, its default 90 s. |
 | 9 | STREAM through PTS: Copy, Scale, Add, Triad (100 internal iterations each). |
 | 10a–10c | cuda_memtest tests 1, 2, and 10 (stress), one pass each. |
-| 11 | gpu-burn with tensor cores, 60 s. |
+| 11 | gpu-burn with tensor cores, 60 s. After the burn it waits 5 s (`-stts 5`, upstream default 30) for its workers to exit before force-killing them. |
 | 12a–12f | nvbandwidth: host↔device copies (each direction, then bidirectional), `device_local_copy`, `device_local_copy_sm`; 1024 MiB, three samples. |
 | 13a–13b | stress-ng at 100% and gpu-burn together, 60 s, in separate containers. |
 
@@ -202,7 +211,14 @@ errors in PTS output count as failures; `exit_code` still shows the real exit co
   Enabling latency instrumentation can affect throughput.
 - **cuda_memtest:** `finished_seconds` is the tool's wall time, rounded to 0.1 s,
   so 0.0 does not mean zero work. Test 10 also reports CUDA event times in
-  milliseconds and bandwidth. Allocation warnings are kept without failing the test.
+  milliseconds and bandwidth. The tool computes that bandwidth as
+  (2 × iterations + 1) × allocated MiB / elapsed ms and labels it GB/s; one MiB/ms is 1.049 GB/s, so the figure
+  is about 5% below true GB/s. Allocation warnings, where the largest possible
+  allocation is slightly smaller than reported free memory, are kept without
+  failing the test.
+- **gpu-burn:** a forced kill of workers that ignored SIGTERM is recorded as a
+  warning. It does not change the GPU status, which gpu-burn decides from error
+  counts alone.
 - **gpu-burn:** GFLOPS statistics count each work update once (arithmetic means,
   not time-weighted); temperature and error readings include every progress line.
 - **STREAM:** a reported validation failure fails the step.

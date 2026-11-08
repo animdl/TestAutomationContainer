@@ -12,7 +12,7 @@ from typing import Any
 
 logger = logging.getLogger(__name__)
 
-PARSER_VERSION = 9
+PARSER_VERSION = 10
 
 ParsedResult = dict[str, Any]
 ParserFunction = Callable[[str, str, dict[str, Any]], ParsedResult]
@@ -915,11 +915,16 @@ def parse_gpu_burn(
         "temperature_celsius_final": temperatures[-1] if temperatures else None,
         "processed_iterations_final": processed[-1] if processed else None,
     }
+    warnings = [] if complete else ["expected gpu-burn completion not found"]
+    # GPU status is decided from the error counts alone, so a worker that ignored
+    # SIGTERM still reports OK; keep a record that it had to be force-killed.
+    if "Killing processes with SIGKILL" in text:
+        warnings.append("gpu-burn workers did not exit after SIGTERM and were force-killed")
     return parsed_result(
         "complete" if complete else "partial",
         outcome,
         metrics,
-        [] if complete else ["expected gpu-burn completion not found"],
+        warnings,
     )
 
 

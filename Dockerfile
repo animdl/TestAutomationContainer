@@ -99,11 +99,15 @@ RUN set -eux; \
     cmake --build /opt/nvbandwidth-src/build -j "$(nproc)"; \
     install -m 0755 /opt/nvbandwidth-src/build/nvbandwidth /usr/local/bin/nvbandwidth
 
+# Test 10 truncates allocations of 2 GiB or more to 32 bits upstream; the guarded
+# patch fails the build if the pinned source differs from what it expects.
+COPY container/cuda_memtest_patch.py /opt/patches/
 RUN set -eux; \
     git init /opt/cuda_memtest-src; \
     git -C /opt/cuda_memtest-src fetch --depth=1 https://github.com/ComputationalRadiationPhysics/cuda_memtest.git "${CUDA_MEMTEST_COMMIT}"; \
     git -C /opt/cuda_memtest-src checkout --detach FETCH_HEAD; \
     test "$(git -C /opt/cuda_memtest-src rev-parse HEAD)" = "${CUDA_MEMTEST_COMMIT}"; \
+    python3 /opt/patches/cuda_memtest_patch.py /opt/cuda_memtest-src; \
     cmake -S /opt/cuda_memtest-src -B /opt/cuda_memtest-src/build \
         -DCMAKE_CUDA_ARCHITECTURES="${CUDA_ARCH}"; \
     cmake --build /opt/cuda_memtest-src/build -j "$(nproc)"; \
