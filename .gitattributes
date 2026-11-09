@@ -1,2 +1,3 @@
-# Auto detect text files and perform LF normalization
-* text=auto
+# Everything runs on Linux; keep LF in every checkout, including Windows.
+* text=auto eol=lf
+*.gz binary

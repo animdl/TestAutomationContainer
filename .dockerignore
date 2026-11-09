@@ -1,1 +1,3 @@
-.git
+# The image only needs the in-container helpers; send nothing else.
+*
+!container/

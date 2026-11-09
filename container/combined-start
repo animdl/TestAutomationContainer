@@ -1,0 +1,31 @@
+#!/bin/sh
+set -eu
+
+# Start barrier for the concurrent CPU and GPU stress steps. Each container
+# marks itself ready in the shared per-run directory, waits for its peer, then
+# execs its workload, so both start within the polling interval.
+role=$1
+shift
+# Accept a leading exec keyword for wrappers that pass one.
+if [ "${1-}" = exec ]; then
+    shift
+fi
+case "$role" in
+    cpu) peer=gpu ;;
+    gpu) peer=cpu ;;
+    *) echo "invalid combined stress role: $role" >&2; exit 2 ;;
+esac
+sync_dir=/run/benchmark-sync
+touch "$sync_dir/$role-ready"
+deadline=$(( $(date +%s) + 120 ))
+while [ ! -f "$sync_dir/$peer-ready" ]; do
+    if [ "$(date +%s)" -ge "$deadline" ]; then
+        echo "timed out waiting for combined stress $peer workload" >&2
+        exit 124
+    fi
+    sleep 0.1
+done
+if [ "$role" = gpu ]; then
+    echo "combined stress GPU starting at $(date -u +%Y-%m-%dT%H:%M:%SZ)" >&2
+fi
+exec "$@"

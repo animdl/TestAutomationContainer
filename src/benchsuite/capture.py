@@ -1,0 +1,464 @@
+"""Command execution, artifact capture, host identity, and result persistence."""
+
+from __future__ import annotations
+
+import gzip
+import hashlib
+import json
+import os
+import platform
+import re
+import shlex
+import shutil
+import signal
+import socket
+import subprocess
+import time
+from collections.abc import Iterable, Sequence
+from contextlib import ExitStack
+from dataclasses import dataclass
+from datetime import datetime, timezone
+from pathlib import Path
+from typing import Any, BinaryIO
+
+COLLECTOR_VERSION = 1
+SCHEMA_VERSION = 1
+
+
+def host_system_info() -> dict[str, str | None]:
+    """Read the runner host's OS label and kernel without invoking any tools."""
+    release = {}
+    try:
+        for line in Path("/etc/os-release").read_text(encoding="utf-8").splitlines():
+            key, separator, value = line.partition("=")
+            if separator and key in ("PRETTY_NAME", "NAME"):
+                release[key] = " ".join(shlex.split(value))
+    except (OSError, ValueError):
+        pass
+    return {"os": release.get("PRETTY_NAME") or release.get("NAME"),
+            "kernel": platform.release()}
+
+
+def workstation_name() -> tuple[str, str | None]:
+    """Return the configured workstation name, falling back to the hostname."""
+    configured = os.environ.get("WORKSTATION_NAME", "").strip()
+    if configured:
+        return configured, None
+    hostname = socket.gethostname()
+    return hostname, f"WORKSTATION_NAME is not set; using hostname {hostname!r}"
+
+
+def _read_text(path: Path) -> str | None:
+    try:
+        return path.read_text(encoding="utf-8", errors="replace").strip() or None
+    except OSError:
+        return None
+
+
+def _cpu_model() -> str | None:
+    for line in (_read_text(Path("/proc/cpuinfo")) or "").splitlines():
+        key, separator, value = line.partition(":")
+        if separator and key.strip() == "model name":
+            return value.strip() or None
+    return None
+
+
+def _memory_total_kib() -> int | None:
+    match = re.search(r"(?m)^MemTotal:\s+(\d+) kB$", _read_text(Path("/proc/meminfo")) or "")
+    return int(match.group(1)) if match else None
+
+
+def _nvidia_gpus() -> tuple[list[dict[str, Any]], str | None]:
+    fields = ("index", "uuid", "name", "driver_version", "compute_cap")
+    try:
+        completed = subprocess.run(
+            ["nvidia-smi", f"--query-gpu={','.join(fields)}", "--format=csv,noheader"],
+            stdin=subprocess.DEVNULL, capture_output=True, timeout=30, check=False,
+        )
+    except (OSError, subprocess.TimeoutExpired) as exc:
+        return [], f"GPU identity unavailable: nvidia-smi failed: {type(exc).__name__}: {exc}"
+    if completed.returncode != 0:
+        error = completed.stderr.decode("utf-8", errors="replace").strip()
+        return [], f"GPU identity unavailable: nvidia-smi exited {completed.returncode}: {error or 'no output'}"
+    gpus = []
+    for line in completed.stdout.decode("utf-8", errors="replace").splitlines():
+        values = [value.strip() for value in line.split(",")]
+        if len(values) != len(fields):
+            continue
+        index, uuid, name, driver, compute = values
+        gpus.append({
+            "index": int(index) if index.isdigit() else None,
+            "uuid": uuid or None,
+            "name": name or None,
+            "driver_version": driver or None,
+            "compute_capability": compute or None,
+        })
+    return gpus, None if gpus else "GPU identity unavailable: nvidia-smi listed no GPUs"
+
+
+def _nvme_identity(device: str) -> dict[str, str | None]:
+    # /sys/block/nvme0n1/device links to the namespace's controller.
+    controller = Path("/sys/block") / Path(device).name / "device"
+    return {
+        "device": device,
+        "model": _read_text(controller / "model"),
+        "serial": _read_text(controller / "serial"),
+        "firmware": _read_text(controller / "firmware_rev"),
+    }
+
+
+def host_hardware_info(nvme_devices: Iterable[str]) -> tuple[dict[str, Any], list[str]]:
+    """Identify the host's CPU, memory, GPUs, and benchmarked NVMe drives.
+
+    Reads /proc and /sys plus one nvidia-smi query; missing values are null.
+    """
+    warnings = []
+    gpus, gpu_warning = _nvidia_gpus()
+    if gpu_warning:
+        warnings.append(gpu_warning)
+    drives = [_nvme_identity(device) for device in nvme_devices]
+    for drive in drives:
+        if drive["serial"] is None:
+            warnings.append(f"NVMe identity unavailable for {drive['device']}")
+    return {
+        "cpu_model": _cpu_model(),
+        "logical_cpus": os.cpu_count(),
+        "memory_total_kib": _memory_total_kib(),
+        "gpus": gpus,
+        "nvme": drives,
+    }, warnings
+
+
+def pts_system_summary(text: str) -> str | None:
+    """Keep PTS's readable system summary, excluding subsequent workload output."""
+    text = text.replace("\r\n", "\n")
+    header = re.search(r"(?m)^Phoronix Test Suite v[^\n]+\nSystem Information\n=+[ \t]*\n", text)
+    if header is None:
+        return None
+    body = re.split(r"(?m)^Running Pre-Test Script[ \t]*$|^[=#]{10,}[ \t]*$",
+                    text[header.end():], maxsplit=1)[0].strip()
+    return body or None
+
+
+@dataclass
+class ExecutionResult:
+    started_at: str
+    finished_at: str
+    duration_seconds: float
+    exit_code: int | None
+    execution_status: str
+    launch_error: str | None = None
+    cleanup_error: str | None = None
+
+
+def utc_now() -> datetime:
+    return datetime.now(timezone.utc)
+
+
+def timestamp(value: datetime | None = None) -> str:
+    return (value or utc_now()).isoformat().replace("+00:00", "Z")
+
+
+def sha256_bytes(data: bytes) -> str:
+    return hashlib.sha256(data).hexdigest()
+
+
+def sha256_path(path: Path) -> str:
+    digest = hashlib.sha256()
+    with path.open("rb") as handle:
+        while True:
+            chunk = handle.read(1024 * 1024)
+            if not chunk:
+                break
+            digest.update(chunk)
+    return digest.hexdigest()
+
+
+def suite_hash(tests: list[tuple[str, str]]) -> str:
+    payload = json.dumps(
+        [{"step": step, "command": command} for step, command in tests],
+        ensure_ascii=False,
+        separators=(",", ":"),
+        sort_keys=True,
+    ).encode()
+    return sha256_bytes(payload)
+
+
+def source_manifest(paths: Iterable[Path]) -> dict[str, str]:
+    return {path.name: sha256_path(path) for path in paths}
+
+
+def inspect_image(image: str) -> tuple[dict[str, Any], str | None]:
+    metadata = {"requested": image, "image_id": None, "repo_digests": []}
+    try:
+        completed = subprocess.run(
+            ["docker", "image", "inspect", image],
+            capture_output=True,
+            timeout=60,
+            check=False,
+        )
+    except (OSError, subprocess.TimeoutExpired) as exc:
+        return metadata, f"docker image inspection failed: {type(exc).__name__}: {exc}"
+
+    if completed.returncode != 0:
+        error = completed.stderr.decode("utf-8", errors="replace").strip()
+        return metadata, (
+            f"docker image inspection exited {completed.returncode}: "
+            f"{error or 'no diagnostic output'}"
+        )
+    try:
+        inspected = json.loads(completed.stdout.decode("utf-8"))[0]
+    except (IndexError, KeyError, TypeError, UnicodeDecodeError, json.JSONDecodeError) as exc:
+        return metadata, f"docker image inspection returned invalid JSON: {exc}"
+    metadata["image_id"] = inspected.get("Id")
+    metadata["repo_digests"] = inspected.get("RepoDigests") or []
+    return metadata, None
+
+
+def artifact_prefix(step: str) -> str:
+    match = re.fullmatch(r"(\d+)(.*)", step)
+    if not match:
+        return re.sub(r"[^a-zA-Z0-9_.-]", "_", step)
+    return f"{int(match.group(1)):02d}{match.group(2)}"
+
+
+def remove_container(container_name: str) -> str | None:
+    """Remove this step's container even if the attached Docker client was killed."""
+    previous_handlers = {}
+    try:
+        # Let cleanup finish when cancellation is requested more than once.
+        for signum in (signal.SIGINT, signal.SIGTERM):
+            previous_handlers[signum] = signal.signal(signum, signal.SIG_IGN)
+        completed = subprocess.run(
+            ["docker", "rm", "--force", container_name],
+            stdin=subprocess.DEVNULL,
+            capture_output=True,
+            timeout=30,
+            check=False,
+        )
+        diagnostic = (completed.stderr or b"").decode("utf-8", errors="replace").strip()
+        # --rm may already have removed the container after it exited.
+        if completed.returncode and "No such container" not in diagnostic:
+            return f"container cleanup failed for {container_name}: {diagnostic or completed.returncode}"
+    except (OSError, subprocess.TimeoutExpired) as exc:
+        return f"container cleanup failed for {container_name}: {type(exc).__name__}: {exc}"
+    finally:
+        for signum, handler in previous_handlers.items():
+            signal.signal(signum, handler)
+    return None
+
+
+def timeout_diagnostic(timeout_seconds: float) -> bytes:
+    return f"runner timeout: command exceeded {timeout_seconds} seconds and was stopped\n".encode()
+
+
+def execute_command(
+    command: list[str],
+    stdout_path: Path,
+    stderr_path: Path,
+    container_name: str | None = None,
+    timeout_seconds: float | None = None,
+) -> ExecutionResult:
+    started = utc_now()
+    monotonic_started = time.monotonic()
+    exit_code: int | None = None
+    status = "launch_failed"
+    launch_error: str | None = None
+    cleanup_error: str | None = None
+
+    with stdout_path.open("wb") as stdout_handle, stderr_path.open("wb") as stderr_handle:
+        try:
+            completed = subprocess.run(
+                command,
+                stdin=subprocess.DEVNULL,
+                stdout=stdout_handle,
+                stderr=stderr_handle,
+                check=False,
+                timeout=timeout_seconds,
+            )
+            exit_code = completed.returncode
+            status = "completed" if exit_code == 0 else "failed"
+        except subprocess.TimeoutExpired:
+            # run() has killed the Docker client; the container keeps running
+            # until it is removed explicitly.
+            status = "timed_out"
+            stderr_handle.write(timeout_diagnostic(timeout_seconds))
+            if container_name:
+                cleanup_error = remove_container(container_name)
+                if cleanup_error:
+                    stderr_handle.write(f"runner cleanup error: {cleanup_error}\n".encode())
+        except KeyboardInterrupt:
+            status = "interrupted"
+            if container_name:
+                cleanup_error = remove_container(container_name)
+                if cleanup_error:
+                    stderr_handle.write(f"runner cleanup error: {cleanup_error}\n".encode())
+        except OSError as exc:
+            launch_error = f"{type(exc).__name__}: {exc}"
+            stderr_handle.write(f"runner launch error: {launch_error}\n".encode())
+        finally:
+            stdout_handle.flush()
+            stderr_handle.flush()
+
+    return ExecutionResult(
+        started_at=timestamp(started),
+        finished_at=timestamp(),
+        duration_seconds=round(time.monotonic() - monotonic_started, 6),
+        exit_code=exit_code,
+        execution_status=status,
+        launch_error=launch_error,
+        cleanup_error=cleanup_error,
+    )
+
+
+def execute_commands(
+    jobs: Sequence[tuple[list[str], Path, Path, str | None, float | None]],
+) -> list[ExecutionResult]:
+    """Launch a group before waiting; retain separate logs and clean up all jobs.
+
+    Each job is (command, stdout_path, stderr_path, container_name, timeout_seconds).
+    A job that exceeds its timeout is stopped on its own; the others keep running.
+    """
+    records = [ExecutionResult(timestamp(), "", 0, None, "launch_failed") for _ in jobs]
+    processes: list[subprocess.Popen[bytes] | None] = [None] * len(jobs)
+    stderr_handles: list[BinaryIO | None] = [None] * len(jobs)
+    starts = [time.monotonic()] * len(jobs)
+    with ExitStack() as files:
+        try:
+            for i, (command, stdout_path, stderr_path, _, _) in enumerate(jobs):
+                starts[i] = time.monotonic()
+                record = records[i]
+                record.started_at = timestamp()
+                stdout = files.enter_context(stdout_path.open("wb"))
+                stderr = stderr_handles[i] = files.enter_context(stderr_path.open("wb"))
+                try:
+                    processes[i] = subprocess.Popen(
+                        command, stdin=subprocess.DEVNULL, stdout=stdout, stderr=stderr,
+                    )
+                except OSError as exc:
+                    record.launch_error = f"{type(exc).__name__}: {exc}"
+                    record.finished_at = timestamp()
+                    record.duration_seconds = round(time.monotonic() - starts[i], 6)
+                    stderr.write(f"runner launch error: {record.launch_error}\n".encode())
+
+            pending = {i: process for i, process in enumerate(processes) if process is not None}
+            while pending:
+                for i, process in list(pending.items()):
+                    code = process.poll()
+                    record = records[i]
+                    timeout = jobs[i][4]
+                    if code is None and timeout is not None and time.monotonic() - starts[i] > timeout:
+                        process.kill()
+                        process.wait(timeout=30)
+                        record.execution_status = "timed_out"
+                        record.finished_at = timestamp()
+                        record.duration_seconds = round(time.monotonic() - starts[i], 6)
+                        stderr_handles[i].write(timeout_diagnostic(timeout))
+                        if jobs[i][3]:
+                            record.cleanup_error = remove_container(jobs[i][3])
+                        del pending[i]
+                    elif code is not None:
+                        record.exit_code = code
+                        record.execution_status = "completed" if code == 0 else "failed"
+                        record.finished_at = timestamp()
+                        record.duration_seconds = round(time.monotonic() - starts[i], 6)
+                        del pending[i]
+                if pending:
+                    time.sleep(0.05)
+        except KeyboardInterrupt:
+            for i, record in enumerate(records):
+                if not record.finished_at:
+                    record.execution_status = "interrupted"
+                    record.finished_at = timestamp()
+                    record.duration_seconds = round(time.monotonic() - starts[i], 6)
+        finally:
+            # Stop Docker clients before removing containers to avoid a late launch.
+            # Cleanup also covers exceptions during launch or polling.
+            previous_handlers = {}
+            try:
+                for signum in (signal.SIGINT, signal.SIGTERM):
+                    previous_handlers[signum] = signal.signal(signum, signal.SIG_IGN)
+                for i, process in enumerate(processes):
+                    if process is not None and process.poll() is None:
+                        process.kill()
+                        process.wait(timeout=30)
+                    if not records[i].finished_at or records[i].execution_status == "interrupted":
+                        name = jobs[i][3]
+                        if name:
+                            records[i].cleanup_error = remove_container(name)
+            finally:
+                for signum, handler in previous_handlers.items():
+                    signal.signal(signum, handler)
+    return records
+
+
+def compress_stream(source: BinaryIO, destination_handle: BinaryIO) -> None:
+    with gzip.GzipFile(
+        filename="",
+        mode="wb",
+        fileobj=destination_handle,
+        mtime=0,
+    ) as destination:
+        shutil.copyfileobj(source, destination, length=1024 * 1024)
+
+
+def compress_artifact(path: Path, output_dir: Path) -> dict[str, Any]:
+    content_sha256 = sha256_path(path)
+    uncompressed_bytes = path.stat().st_size
+    compressed_path = path.with_name(path.name + ".gz")
+    temporary = compressed_path.with_name(
+        f".{compressed_path.name}.{os.getpid()}.tmp"
+    )
+    try:
+        with path.open("rb") as source, temporary.open("wb") as destination:
+            compress_stream(source, destination)
+            destination.flush()
+            os.fsync(destination.fileno())
+        os.replace(temporary, compressed_path)
+        path.unlink()
+    finally:
+        if temporary.exists():
+            temporary.unlink()
+
+    return {
+        "path": compressed_path.relative_to(output_dir).as_posix(),
+        "compression": "gzip",
+        "uncompressed_bytes": uncompressed_bytes,
+        "compressed_bytes": compressed_path.stat().st_size,
+        "content_sha256": content_sha256,
+        "artifact_sha256": sha256_path(compressed_path),
+    }
+
+
+def read_parser_text(path: Path) -> str:
+    return path.read_bytes().decode("utf-8", errors="replace")
+
+
+def validate_results_consistency(results: dict[str, Any]) -> None:
+    """Check relationships between fields; schema validation lives in tests."""
+    steps = results["suite"]["steps"]
+    if results["suite"]["test_count"] != len(steps):
+        raise ValueError("suite test_count does not match steps")
+    if len(set(steps)) != len(steps):
+        raise ValueError("suite steps are not unique")
+    for test in results["tests"]:
+        if (
+            test["metrics"] is not None
+            and test["metrics"].get("kind") != test["parser"].get("name")
+        ):
+            raise ValueError(f"test {test['step']} parser and metrics kind differ")
+
+
+def atomic_save(path: Path, results: dict[str, Any]) -> None:
+    validate_results_consistency(results)
+    temporary = path.with_name(f".{path.name}.{os.getpid()}.tmp")
+    try:
+        with temporary.open("w", encoding="utf-8", newline="\n") as handle:
+            json.dump(results, handle, ensure_ascii=False, indent=2)
+            handle.write("\n")
+            handle.flush()
+            os.fsync(handle.fileno())
+        os.replace(temporary, path)
+    finally:
+        if temporary.exists():
+            temporary.unlink()
