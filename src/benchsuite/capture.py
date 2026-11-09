@@ -21,8 +21,8 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, BinaryIO
 
-COLLECTOR_VERSION = 9
-SCHEMA_VERSION = 10
+COLLECTOR_VERSION = 1
+SCHEMA_VERSION = 1
 
 
 def host_system_info() -> dict[str, str | None]:

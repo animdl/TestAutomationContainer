@@ -1,6 +1,6 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
-  "$id": "https://example.invalid/workstation-benchmark-results-v10.schema.json",
+  "$id": "https://example.invalid/workstation-benchmark-results-v1.schema.json",
   "title": "Workstation benchmark results",
   "type": "object",
   "additionalProperties": false,
@@ -20,7 +20,7 @@
     "errors"
   ],
   "properties": {
-    "schema_version": {"const": 10},
+    "schema_version": {"const": 1},
     "collector": {
       "type": "object",
       "additionalProperties": false,

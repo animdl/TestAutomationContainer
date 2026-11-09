@@ -12,7 +12,7 @@ from typing import Any
 
 logger = logging.getLogger(__name__)
 
-PARSER_VERSION = 11
+PARSER_VERSION = 1
 CUDA_MEMTEST_MIB_PER_MS_TO_GB_PER_S = 1048576 * 1000 / 1e9
 
 ParsedResult = dict[str, Any]
