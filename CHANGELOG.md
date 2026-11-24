@@ -13,6 +13,10 @@ all 25 steps completed, parsed fully, and passed. Captures made during
 development carry earlier, higher version numbers and are not comparable with
 this version.
 
+- The Dockerfile lives at `container/Dockerfile` and is built from the
+  repository root with `docker build -f container/Dockerfile`;
+  `container/Dockerfile.dockerignore` limits the context to `container/`. The
+  image contents are unchanged.
 - Pinned image: base image digest, Ubuntu archive snapshot, exact stress-ng,
   memtester, nvme-cli, and GCC versions, Git commits for PTS, gpu-burn,
   nvbandwidth, and cuda_memtest, and the PTS test profiles.

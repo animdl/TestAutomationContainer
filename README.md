@@ -25,7 +25,7 @@ Run everything in Bash on the Linux workstation, from the repository root.
 
 | Path | Runs on | Contents |
 | --- | --- | --- |
-| `Dockerfile` | build | The pinned image. Its build context is only `container/`. |
+| `container/Dockerfile` | build | The pinned image. Built from the repository root; `container/Dockerfile.dockerignore` limits the context to `container/`. |
 | `container/` | in the image | `pts-profile` (pinned PTS launcher), `fio_profile.py` (FIO latency customization), `cuda_memtest_patch.py` (test 10 size fix, applied at build), `combined-start` (CPU/GPU start barrier). |
 | `src/benchsuite/` | host | `playbook.py` (suite definition), `runner.py`, `capture.py`, `parsers.py`, `results.schema.json`. |
 | `scripts/` | host | `verify-mounts`. |
@@ -34,11 +34,14 @@ Run everything in Bash on the Linux workstation, from the repository root.
 
 ```bash
 export BENCH_IMAGE=bench:latest
-docker build -t "$BENCH_IMAGE" .
+docker build -f container/Dockerfile -t "$BENCH_IMAGE" .
 
 docker run --rm --gpus all "$BENCH_IMAGE" nvidia-smi
 docker run --rm "$BENCH_IMAGE" pts-profile verify
 ```
+
+The per-Dockerfile ignore file needs BuildKit, the default builder since Docker
+23.0; without it the whole repository is sent as the context.
 
 `CUDA_ARCH` defaults to `89`; set it with `--build-arg` for other GPUs. The build
 fails if any pinned PTS profile did not install, even when PTS reported success.
